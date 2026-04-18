@@ -7,9 +7,12 @@ sdk: gradio
 sdk_version: "4.44.0"
 app_file: app.py
 pinned: false
+license: Apache License 2.0
 ---
 
 # BreakYourStudy（课程作品 / Gradio）
+
+创空间说明文档：<https://www.modelscope.cn/docs/%E5%88%9B%E7%A9%BA%E9%97%B4%E5%8D%A1%E7%89%87>
 
 ## 本地运行
 
@@ -93,3 +96,8 @@ MODEL=deepseek-chat
 - 密钥：在创空间的 **环境变量/密钥** 面板填写 `BASE_URL` / `API_KEY` / `MODEL`，不要把 `.env` 上传。
 - 绑定地址：创空间需对外监听时，设置环境变量 `GRADIO_SERVER_NAME=0.0.0.0`（本地默认 `127.0.0.1`）。
 
+#### Clone with HTTP
+
+```bash
+git clone https://www.modelscope.cn/studios/chengming614/break-restudy.git
+```
