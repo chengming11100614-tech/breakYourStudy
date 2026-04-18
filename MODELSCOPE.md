@@ -34,6 +34,7 @@ git push -u modelscope main
 | `QA_MODEL` | 可选；小节问答、关联问答默认 `ecnu-max`（见 `.env.example`） |
 | `LLM_PARALLEL_*` | 可选；并行第二通道（DeepSeek 等） |
 | `GRADIO_SERVER_NAME` | **线上必设** `0.0.0.0`，否则外网无法访问 |
+| `GRADIO_IFRAME_SAFE` | 可选 `1`：在 iframe 里禁用易炸布局（默认在路径含 `/studio_service/` 时自动开启） |
 | `PORT` | 一般 `7860`；若平台注入 `PORT` 则以其为准（`app.py` 会读取） |
 | `REQUEST_TIMEOUT_S` / `MAX_RETRIES` | 可选 |
 

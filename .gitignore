@@ -1,4 +1,6 @@
 .env
+MODELSCOPE_ENV_FILLED.txt
+break-restudy/
 data/
 __pycache__/
 .pytest_cache/

@@ -619,6 +619,42 @@ div[class^="gradio-container-"] textarea {
 }
 """
 
+# In iframes (e.g. ModelScope studio), `100vh`/`100dvh` follow the *top-level* viewport, not the iframe,
+# which blows up min-heights and flex layout and can look like endless loading.
+CUSTOM_CSS_IFRAME = r"""
+.gradio-container,
+div[class^="gradio-container-"] {
+  overflow-x: clip !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+div[class^="gradio-container-"] .wrap,
+div[class^="gradio-container-"] main.contain {
+  min-height: auto !important;
+  height: auto !important;
+}
+#project_right_panel,
+#project_left_panel {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: 720px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+"""
+
+
+def _iframe_safe_layout() -> bool:
+    """Avoid vh/flex layout bugs when Gradio runs inside an iframe (ModelScope 创空间等)."""
+    raw = (os.getenv("GRADIO_IFRAME_SAFE") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    cwd = Path.cwd().resolve().as_posix()
+    return "/studio_service/" in cwd
+
 
 def _show_page(page_name: str) -> tuple[gr.Update, gr.Update]:
     return (
@@ -809,13 +845,17 @@ def main() -> None:
         block_label_border_width="0px",
     )
     build_tag = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    iframe_safe = _iframe_safe_layout()
+    if iframe_safe:
+        print("* GRADIO_IFRAME_SAFE layout: on (iframe / 创空间)", flush=True)
 
     # Gradio 6：fill_height=False 时前端根 Column 的 scale 为 null，主区易被 flex 压成 0 高度（白屏仅底栏）
+    # 在 iframe 内再开 fill_width 易与 100vh CSS 叠加导致左右栏被撑裂、长时间加载；创空间下关 fill_width。
     with gr.Blocks(
         title="Knowledge Forest",
         analytics_enabled=False,
         fill_height=True,
-        fill_width=True,
+        fill_width=not iframe_safe,
     ) as demo:
         # --- Pages（顶层路由 Column；State 在页面块之后，兼容 Gradio 6 布局）---
         with gr.Column(visible=True) as landing_p:
@@ -3221,11 +3261,12 @@ def main() -> None:
     )
     maybe_warmup_llm()
     demo.queue()
+    _css = CUSTOM_CSS + (CUSTOM_CSS_IFRAME if iframe_safe else "")
     demo.launch(
         server_name=server_name,
         server_port=server_port,
         theme=theme,
-        css=CUSTOM_CSS,
+        css=_css,
         show_error=True,
         ssr_mode=False,
     )
