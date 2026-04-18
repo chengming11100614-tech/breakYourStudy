@@ -109,6 +109,20 @@ def _first_free_port(start: int, host: str, *, max_tries: int = 24) -> int:
     return start
 
 
+# Gradio 默认主要识别块级 ``$$``；模型常用行内 ``$...$``，需显式声明（``$$`` 放前避免被单个 ``$`` 截断）。
+MARKDOWN_LATEX_DELIMITERS: list[dict[str, str | bool]] = [
+    {"left": "$$", "right": "$$", "display": True},
+    {"left": "$", "right": "$", "display": False},
+    {"left": r"\(", "right": r"\)", "display": False},
+    {"left": r"\[", "right": r"\]", "display": True},
+]
+
+
+def _md(value: str | None = None, **kwargs) -> gr.Markdown:
+    kwargs.setdefault("latex_delimiters", MARKDOWN_LATEX_DELIMITERS)
+    return gr.Markdown(value, **kwargs)
+
+
 # region agent log
 def _dbg_log(runId: str, hypothesisId: str, location: str, message: str, data: dict) -> None:
     try:
@@ -332,6 +346,24 @@ div[class^="gradio-container-"] main.contain {
 }
 #project_left_panel .left-page-extra .prose h4:first-child {
   margin-top: 0 !important;
+}
+
+/* Project header: two actions stay compact left (not half-screen wide) */
+#project_top_bar {
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  column-gap: 12px !important;
+}
+#project_top_btns {
+  flex: 0 0 auto !important;
+  width: auto !important;
+}
+#project_top_btns button,
+#project_top_btns .gr-button,
+#project_top_btns .gr-button > button {
+  width: auto !important;
+  min-width: 0 !important;
+  flex: 0 0 auto !important;
 }
 
 /* Buttons: unified height and padding */
@@ -1007,10 +1039,14 @@ def main() -> None:
             )
 
         with gr.Column(visible=False) as project_p:
-            with gr.Row():
-                btn_back_home = gr.Button("← 回到首页", elem_classes=["btn-secondary"], scale=0)
-                btn_new_project = gr.Button("创建新项目", elem_classes=["btn-primary"], scale=0)
-                project_title_display = gr.Markdown("## 🌳 当前项目：未命名")
+            # 顶栏：两按钮收紧在左上，标题占剩余宽（避免 Row 三等分把按钮拉成整行半宽）
+            with gr.Row(elem_id="project_top_bar"):
+                with gr.Row(scale=0, elem_id="project_top_btns"):
+                    btn_back_home = gr.Button("← 回到首页", elem_classes=["btn-secondary"], scale=0)
+                    btn_new_project = gr.Button("创建新项目", elem_classes=["btn-primary"], scale=0)
+                # Markdown 组件本身不支持 scale；用 Column 占满顶栏剩余宽度
+                with gr.Column(scale=1, min_width=0):
+                    project_title_display = _md("## 🌳 当前项目：未命名")
 
             # equal_height=False: avoid Gradio stretching the left column and injecting inner scroll
             with gr.Row(equal_height=False):
@@ -1029,55 +1065,55 @@ def main() -> None:
                             btn_pipe_3 = gr.Button("下一步", elem_classes=["btn-secondary"])
                             pipe_section = gr.Dropdown(label="小节", choices=[], interactive=True)
                             btn_pipe_4 = gr.Button("下一步", elem_classes=["btn-secondary"])
-                            gr.Markdown("#### 更多", elem_classes=["section-title"])
+                            _md("#### 更多", elem_classes=["section-title"])
                             btn_node_assoc = gr.Button("知识关联", elem_classes=["btn-secondary"])
                             btn_export = gr.Button("导出", elem_classes=["btn-secondary"])
-                            status = gr.Markdown("💡 状态 空闲", elem_classes=["status-card"])
+                            status = _md("💡 状态 空闲", elem_classes=["status-card"])
                             if missing_env_hint:
-                                gr.Markdown(missing_env_hint, elem_classes=["status-card"])
+                                _md(missing_env_hint, elem_classes=["status-card"])
 
                         left_page_chat = gr.Column(visible=True, elem_classes=["left-page", "forest-card"])
                         with left_page_chat:
-                            gr.Markdown("#### 🧾 信息填写\n只用于第一次采集：填好后请点 **开始生成**。大纲、章节与讲解请切换到 **附加**。")
-                            gr.Markdown("##### 学科/技能", elem_classes=["section-title"])
+                            _md("#### 🧾 信息填写\n只用于第一次采集：填好后请点 **开始生成**。大纲、章节与讲解请切换到 **附加**。")
+                            _md("##### 学科/技能", elem_classes=["section-title"])
                             intake_topic = gr.Textbox(label="学科主题（必填）", placeholder="例 高等数学 / 线性代数 / 游戏策划", container=False)
-                            gr.Markdown("##### 目标", elem_classes=["section-title"])
+                            _md("##### 目标", elem_classes=["section-title"])
                             intake_goal = gr.Textbox(
                                 label="目标（必填）",
                                 placeholder="例 期末80分 / 做出一个可展示作品 / 2个月内入门并能完成项目",
                                 lines=1,
                                 container=False,
                             )
-                            gr.Markdown("##### 背景", elem_classes=["section-title"])
+                            _md("##### 背景", elem_classes=["section-title"])
                             intake_background = gr.Textbox(
                                 label="你的背景（必填）",
                                 placeholder="例 大一 理科 高中数学一般 学过导数但不熟",
                                 lines=1,
                                 container=False,
                             )
-                            gr.Markdown("##### 时间（选填）", elem_classes=["section-title"])
+                            _md("##### 时间（选填）", elem_classes=["section-title"])
                             with gr.Row():
                                 intake_time = gr.Textbox(label="每周可投入时间（选填）", placeholder="例 6小时/周", container=False)
-                            gr.Markdown("##### 约束/偏好（选填）", elem_classes=["section-title"])
+                            _md("##### 约束/偏好（选填）", elem_classes=["section-title"])
                             intake_constraints = gr.Textbox(
                                 label="约束/偏好（选填）",
                                 placeholder="例 只看中文 / 想要刷题为主 / 想配合项目实践",
                                 lines=1,
                                 container=False,
                             )
-                            gr.Markdown("##### 开始", elem_classes=["section-title"])
-                            gr.Markdown(
+                            _md("##### 开始", elem_classes=["section-title"])
+                            _md(
                                 "_**提示**：首次点击「开始生成」时，整体加载约 **5～10 分钟**，请耐心等待，勿重复提交。可在 `.env` 设置 `FIRST_SUBMIT_PASSES=1` 或开启 `FIRST_SUBMIT_OVERLAP=1`（见 README）以缩短等待。_"
                             )
                             btn_pipe_1 = gr.Button("开始生成", elem_classes=["btn-primary"])
 
                         left_page_projects = gr.Column(visible=False, elem_classes=["left-page", "forest-card"])
                         with left_page_projects:
-                            gr.Markdown("#### 切换项目")
+                            _md("#### 切换项目")
                             sidebar_project_pick = gr.Dropdown(label="选择项目", choices=[], interactive=True)
                             btn_sidebar_reload = gr.Button("刷新列表", elem_classes=["btn-secondary"])
                             btn_sidebar_open = gr.Button("切换到该项目", elem_classes=["btn-primary"])
-                            sidebar_hint = gr.Markdown("_选择后点「切换」即可_")
+                            sidebar_hint = _md("_选择后点「切换」即可_")
                             sidebar_project_delete_cg = gr.CheckboxGroup(
                                 label="勾选要从本机清除的项目（删除 data/projects 下对应文件）",
                                 choices=[],
@@ -1090,21 +1126,24 @@ def main() -> None:
                     _TAB_NODE_ASSOC = 4
                     with gr.Tabs() as project_right_tabs:
                         with gr.TabItem("📚 参考书"):
-                            books_md = gr.Markdown()
+                            books_md = _md()
                         with gr.TabItem("📑 大纲"):
-                            framework_md = gr.Markdown()
+                            framework_md = _md()
                         with gr.TabItem("✂️ 本章小节"):
-                            chapter_sections_md = gr.Markdown()
+                            chapter_sections_md = _md()
                         with gr.TabItem("📝 小节详解"):
-                            gr.Markdown(
+                            _md(
                                 "##### 学习闭环（8 环节）\n在 **附加** 选好「小节」后点 **下一步**；下方会生成完整的 8 环节讲解。"
                             )
                             celebrate_html = gr.HTML()
-                            section_expand_md = gr.Markdown()
-                            teen_loop_md = gr.Markdown()
-                            gr.Markdown("##### 本小节问答（仅限本节内容）")
+                            section_expand_md = _md()
+                            teen_loop_md = _md()
+                            _md("##### 本小节问答（仅限本节内容）")
                             section_chat_state = gr.State(value=[])
-                            section_chat = gr.Chatbot(height=260)
+                            section_chat = gr.Chatbot(
+                                height=260,
+                                latex_delimiters=MARKDOWN_LATEX_DELIMITERS,
+                            )
                             section_chat_in = gr.Textbox(
                                 label="提问",
                                 placeholder="只问本小节：概念含义、推导直觉、例题思路、常见误区…",
@@ -1115,7 +1154,7 @@ def main() -> None:
                                 btn_section_chat_clear = gr.Button("清空", elem_classes=["btn-secondary"])
                             btn_section_learned = gr.Button("已学会", elem_classes=["btn-secondary"])
                         with gr.TabItem("🔗 节点关联"):
-                            gr.Markdown(
+                            _md(
                                 "##### 节点关联\n"
                                 "本页仅保留 **自主关联**：从已学库选两条，点「分析两者关联」生成桥梁与发散；"
                                 "下方可针对该分析继续问答。"
@@ -1127,11 +1166,14 @@ def main() -> None:
                             with gr.Row():
                                 assoc_a = gr.Dropdown(label="已学 A", choices=[], interactive=True)
                                 assoc_b = gr.Dropdown(label="已学 B", choices=[], interactive=True)
-                            assoc_tool_md = gr.Markdown()
-                            gr.Markdown("---")
-                            gr.Markdown("##### 关联问答（针对上方关联内容提问）")
+                            assoc_tool_md = _md()
+                            _md("---")
+                            _md("##### 关联问答（针对上方关联内容提问）")
                             assoc_chat_state = gr.State(value=[])
-                            assoc_chat = gr.Chatbot(height=260)
+                            assoc_chat = gr.Chatbot(
+                                height=260,
+                                latex_delimiters=MARKDOWN_LATEX_DELIMITERS,
+                            )
                             assoc_chat_in = gr.Textbox(
                                 label="提问",
                                 placeholder="关于上方关联内容：为什么这两个概念相关？能否举个例子？…",
@@ -1141,13 +1183,14 @@ def main() -> None:
                                 btn_assoc_chat_send = gr.Button("发送", elem_classes=["btn-primary"])
                                 btn_assoc_chat_clear = gr.Button("清空", elem_classes=["btn-secondary"])
                         with gr.TabItem("🧭 关联漫游"):
-                            gr.Markdown(
+                            _md(
                                 "从**全局已学库**随机抽题：先 6 选 2 做关联，再反复「3 选 1」把新知识点接到上一轮结论上；"
                                 "结束时生成知识网（含**传递关联**：新点与此前基础知识点之间的间接边）。"
                             )
-                            roam_status_md = gr.Markdown("_先点「开始漫游」。需至少 2 条已学（在「小节详解」点「已学会」）。_")
+                            roam_status_md = _md("_先点「开始漫游」。需至少 2 条已学（在「小节详解」点「已学会」）。_")
                             with gr.Row():
                                 btn_roam_start = gr.Button("开始漫游", elem_classes=["btn-primary"])
+                                # 回顾下拉的显隐勿绑在本按钮的「点两次」上：见 roam_replay_dd（曾用 visible=False 致 Tabs 内首帧不重排）。
                                 btn_roam_finish = gr.Button("结束并生成网络", elem_classes=["btn-secondary"])
                             roam_pick_two = gr.CheckboxGroup(
                                 label="随机六项中恰好选两个",
@@ -1162,17 +1205,19 @@ def main() -> None:
                                 info="完成首轮关联后，会显示当前「桥梁」名称，便于识别下一轮是在该桥梁上延伸。",
                             )
                             btn_roam_confirm_one = gr.Button("确认继续关联", elem_classes=["btn-primary"])
-                            roam_step_md = gr.Markdown("_（最新一轮关联全文）_")
-                            roam_graph_md = gr.Markdown("_（结束后在此查看知识网）_")
+                            roam_step_md = _md("_（最新一轮关联全文）_")
+                            roam_graph_md = _md("_（结束后在此查看知识网）_")
+                            # 勿用 visible=False：在 Tabs 内首次 True 时前端偶发不重排，表现为「结束」要点两次才出现下拉。
                             roam_replay_dd = gr.Dropdown(
                                 label="回顾本轮关联步骤",
+                                info="漫游进行中为灰色不可选；点「结束并生成网络」后此处会列出各步，选一项即可看全文。",
                                 choices=[],
                                 value=None,
-                                interactive=True,
-                                visible=False,
+                                interactive=False,
+                                visible=True,
                             )
-                            roam_replay_md = gr.Markdown(
-                                "_（结束并生成网络后，在此选择某一步即可查看该次关联的全文。）_"
+                            roam_replay_md = _md(
+                                "_（结束并生成网络后，用上方下拉框选某一步即可查看该次关联的全文。）_"
                             )
 
 
@@ -2147,10 +2192,10 @@ def main() -> None:
             return f"三选一：选一个已学知识点，与桥梁「{b}」继续关联"
 
         def _roam_replay_cleared():
-            """Hide replay UI while roaming / before finish."""
+            """Replay dropdown stays visible but disabled until finish (avoids Tabs+visible toggle glitch)."""
             return (
-                gr.update(choices=[], value=None, visible=False),
-                "_（结束并生成网络后，在此选择某一步即可查看该次关联的全文。）_",
+                gr.update(choices=[], value=None, interactive=False, visible=True),
+                "_（结束并生成网络后，用上方下拉框选某一步即可查看该次关联的全文。）_",
             )
 
         def _roam_replay_after_finish(st: dict) -> tuple:
@@ -2158,7 +2203,7 @@ def main() -> None:
             vnodes = st.get("virtual_nodes") or []
             if not vnodes:
                 return (
-                    gr.update(choices=[], value=None, visible=False),
+                    gr.update(choices=[], value=None, interactive=False, visible=True),
                     "_（本次没有可回顾的关联步骤。）_",
                 )
             choices: list[tuple[str, str]] = []
@@ -2170,7 +2215,7 @@ def main() -> None:
             inner = {"virtual_nodes": [first]}
             md0 = _roam_markdown_heading_bridge(inner, str(first.get("markdown") or ""))
             return (
-                gr.update(choices=choices, value=str(first.get("id") or ""), visible=True, interactive=True),
+                gr.update(choices=choices, value=str(first.get("id") or ""), interactive=True, visible=True),
                 md0,
             )
 

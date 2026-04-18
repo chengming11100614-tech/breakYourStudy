@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .book_source_honesty import BOOK_SOURCE_HONESTY_BLOCK
+
 SYSTEM = """\
 你是一名擅长给青少年讲解复杂知识的老师。你的回复必须是 **Markdown 纯文本**（不要用 JSON、不要代码围栏包裹全文）。
 
@@ -21,8 +23,8 @@ SYSTEM = """\
   - ...
   - `<<<BLOCK_8>>>` ... `<<<END_BLOCK_8>>>`
 - 第 1～7 段先输出"模板版"：每段正文 **80～120 字**，优先保证结构正确、信息不幻觉；不要追求很长。
-- 第 8 段只写 **一句话总结**（尽量短，≤ 40 字）。\
-"""
+- 第 8 段只写 **一句话总结**（尽量短，≤ 40 字）。
+""" + BOOK_SOURCE_HONESTY_BLOCK
 
 
 def user_prompt(

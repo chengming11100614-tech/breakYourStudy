@@ -1,9 +1,39 @@
 from __future__ import annotations
 
+import json
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _coerce_llm_text_field(v: Any, *, field: str) -> str:
+    """LLM 偶发把应为一段话的字段输出成 JSON 对象；压成可读字符串以满足 schema。"""
+    if v is None:
+        raise ValueError(f"{field} 不能为空")
+    if isinstance(v, dict):
+        parts: list[str] = []
+        for key, val in v.items():
+            ks = str(key).strip()
+            if isinstance(val, str):
+                line = f"{ks}：{val.strip()}" if ks else val.strip()
+            elif isinstance(val, (list, tuple)):
+                inner = "；".join(str(x).strip() for x in val if str(x).strip())
+                line = f"{ks}：{inner}" if ks else inner
+            else:
+                line = f"{ks}：{json.dumps(val, ensure_ascii=False)}" if ks else json.dumps(val, ensure_ascii=False)
+            if line.strip():
+                parts.append(line.strip())
+        out = "\n".join(parts).strip()
+        if not out:
+            out = json.dumps(v, ensure_ascii=False)
+        return out
+    if isinstance(v, list):
+        return "\n".join(str(x).strip() for x in v if str(x).strip())
+    s = str(v).strip()
+    if not s:
+        raise ValueError(f"{field} 不能为空")
+    return s
 
 
 class RelationType(str, Enum):
@@ -125,12 +155,22 @@ class FrameworkChapter(BaseModel):
     learning_method: str = Field(min_length=1)
     book_reference_note: str = Field(min_length=1)
 
+    @field_validator("core_ideas", "learning_method", "book_reference_note", mode="before")
+    @classmethod
+    def _string_fields_from_llm(cls, v: Any, info):  # noqa: ANN001
+        return _coerce_llm_text_field(v, field=info.field_name or "field")
+
 
 class ChapterFrameworkResult(BaseModel):
     meta: dict[str, str] = Field(default_factory=dict)
     disciplinary_logic: DisciplinaryLogic
     global_learning_method: str = Field(min_length=1)
     chapters: list[FrameworkChapter] = Field(min_length=5, max_length=12)
+
+    @field_validator("global_learning_method", mode="before")
+    @classmethod
+    def _global_learning_method_to_str(cls, v: Any) -> str:
+        return _coerce_llm_text_field(v, field="global_learning_method")
 
 
 class CourseSection(BaseModel):

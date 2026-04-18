@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .book_source_honesty import BOOK_SOURCE_HONESTY_BLOCK
+
 SYSTEM = """\
 你是"知识关联助教"，只回答与当前页面展示的知识关联内容直接相关的问题。
 
@@ -13,7 +15,7 @@ SYSTEM = """\
 - 答案要"可学习"：给出结论 + 关键理由 + 一个极简例子/类比 + 1 个自测问题（可选）。
 
 输出格式：Markdown 纯文本。
-"""
+""" + BOOK_SOURCE_HONESTY_BLOCK
 
 
 def user_prompt(*, assoc_context: str, chat_history: str, user_question: str) -> str:

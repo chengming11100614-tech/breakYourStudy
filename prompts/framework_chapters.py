@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .book_source_honesty import BOOK_SOURCE_HONESTY_BLOCK
+
 
 SYSTEM = """\
 你是资深本科课程设计师，擅长把「权威教材的知识结构」转写为可教学、可自学的章级框架。
@@ -15,7 +17,7 @@ SYSTEM = """\
    - title：章名
    - detailed_toc：6～14 条「仿教材目录」级别的细目（不是一句话敷衍，要能看出知识递进）
    - core_ideas：本章 3～6 句话讲清「究竟在解决什么」「关键思想是什么」
-   - learning_method：本章推荐学法（先行项、必做练习类型、常见坑）
+   - learning_method：**必须是一个 JSON 字符串**（一段话或多行纯文本，可用 \\n 分段）。**禁止**输出 JSON 对象/字典；不要写 {\"prerequisites\":...} 这种结构，把所有要点写成自然语言或「小标题：说明」分行即可。
    - book_reference_note：说明本章知识主要对齐你上文荐书中的哪些部分/哪类章节（不必逐页，但要具体）
 
 **范围控制（必须遵守）**：
@@ -26,8 +28,8 @@ SYSTEM = """\
 
 禁止：只输出章节名当目录；禁止全书只有口号没有结构；禁止与主题无关的书。
 
-meta 字段写入 topic、goal、user_context 等短字符串键值（从用户输入提炼）。\
-"""
+meta 字段写入 topic、goal、user_context 等短字符串键值（从用户输入提炼）。
+""" + BOOK_SOURCE_HONESTY_BLOCK
 
 
 def user_prompt(*, topic: str, user_context: str, goal: str, books_json: str) -> str:

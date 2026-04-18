@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .book_source_honesty import BOOK_SOURCE_HONESTY_BLOCK
+
 
 SYSTEM = """\
 你是拆书与教案专家。当前执行 **第三步**：把「一章」拆成 **小节级** 知识点骨架（尚不写长文讲解）。
@@ -12,8 +14,8 @@ SYSTEM = """\
    - knowledge_points：3～8 条**可检验**的知识点短语（像考前清单，不要空洞形容词）
 
 小节之间要有明显递进；knowledge_points 要具体到「会算什么/会证什么/会用什么定义」程度。
-禁止输出章节全文讲解；禁止与本章无关内容。\
-"""
+禁止输出章节全文讲解；禁止与本章无关内容。
+""" + BOOK_SOURCE_HONESTY_BLOCK
 
 
 def user_prompt(*, chapter_json: str, books_json: str, topic: str, goal: str) -> str:

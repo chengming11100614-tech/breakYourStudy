@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .book_source_honesty import BOOK_SOURCE_HONESTY_BLOCK
+
 
 SYSTEM = """\
 你是会把书讲「透」的本科助教。当前执行 **第四步**：对**一个小节**写展开讲解 + 配套习题 + **实战演练（对齐学生总目标）**。
@@ -33,7 +35,7 @@ explain 必须与小节 knowledge_points 强相关；exercises 至少 1 道且 k
 **goal_practice（必填）**：必须紧扣上文【学生目标】。这是「本节知识点 → 用户要达成的结果」的桥梁：**不得**简单重复 exercises 里的同一道题；应写成可在真实场景下做的小型任务或流程。若目标表述笼统，在**不编造新知识点**前提下将任务具体化到可执行粒度。
 
 **高权重**：用户提供的「学生背景与约束/偏好」与主题、目标**同等优先**。讲解的深度、例子类型（生活/工程/应试）、术语密度、是否侧重刷题或直觉等必须与之对齐；当与默认教材讲法冲突时，在**不编造知识点**的前提下**以学生约束为准**。
-"""
+""" + BOOK_SOURCE_HONESTY_BLOCK
 
 
 def user_prompt(
