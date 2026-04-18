@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,30 @@ def _exports_dir() -> Path:
 
 def _learned_path() -> Path:
     return _root() / "learned.json"
+
+
+def _project_ids_on_disk() -> set[str]:
+    d = _projects_dir()
+    if not d.exists():
+        return set()
+    return {p.stem for p in d.glob("*.json")}
+
+
+def _filter_learned_persisted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop entries tied to unsaved sessions (local:) or deleted project files."""
+    pids = _project_ids_on_disk()
+    out: list[dict[str, Any]] = []
+    for it in items:
+        ref = str(it.get("source_ref") or "").strip()
+        if ref.startswith("local:"):
+            continue
+        if ":" in ref:
+            pid, _, _ = ref.partition(":")
+            pid = pid.strip()
+            if pid and pid not in pids:
+                continue
+        out.append(it)
+    return out
 
 
 def _assoc_edges_path() -> Path:
@@ -113,6 +138,63 @@ def load_project(project_id: str) -> dict[str, Any] | None:
         return None
 
 
+_PROJECT_ID_SAFE = re.compile(r"^[\w-]+$")
+
+
+def delete_project_files(project_ids: list[str]) -> list[str]:
+    """Remove ``data/projects/{id}.json`` for each id. Only accepts safe id stems."""
+    d = _projects_dir()
+    deleted: list[str] = []
+    for raw in project_ids:
+        pid = (raw or "").strip()
+        if not pid or not _PROJECT_ID_SAFE.match(pid):
+            continue
+        p = d / f"{pid}.json"
+        if p.is_file():
+            try:
+                p.unlink()
+                deleted.append(pid)
+            except OSError:
+                continue
+    return deleted
+
+
+def prune_learned_for_removed_projects(removed_project_ids: set[str]) -> int:
+    """Remove learned entries whose ``source_ref`` is ``projectId:...`` for a deleted project id."""
+    rm = {str(x).strip() for x in removed_project_ids if str(x).strip()}
+    if not rm:
+        return 0
+    p = _learned_path()
+    if not p.exists():
+        return 0
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        raw = list(data) if isinstance(data, list) else []
+    except Exception:
+        return 0
+    out: list[dict[str, Any]] = []
+    n = 0
+    for it in raw:
+        ref = str(it.get("source_ref") or "").strip()
+        if ":" in ref and not ref.startswith("local:"):
+            pid, _, _ = ref.partition(":")
+            if pid.strip() in rm:
+                n += 1
+                continue
+        out.append(it)
+    if n:
+        save_learned(_filter_learned_persisted(out))
+    return n
+
+
+def delete_projects_selective(project_ids: list[str]) -> tuple[list[str], int]:
+    """Delete project files then prune learned rows tied to those ids. Returns (deleted_ids, learned_removed_count)."""
+    uniq = list(dict.fromkeys([(x or "").strip() for x in project_ids if (x or "").strip()]))
+    deleted = delete_project_files(uniq)
+    n_learned = prune_learned_for_removed_projects(set(deleted))
+    return deleted, n_learned
+
+
 def save_export(*, name: str, markdown: str) -> str:
     d = _exports_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -147,9 +229,13 @@ def load_learned() -> list[dict[str, Any]]:
         return []
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return list(data) if isinstance(data, list) else []
+        raw = list(data) if isinstance(data, list) else []
     except Exception:
         return []
+    out = _filter_learned_persisted(raw)
+    if len(out) != len(raw):
+        save_learned(out)
+    return out
 
 
 def save_learned(items: list[dict[str, Any]]) -> None:

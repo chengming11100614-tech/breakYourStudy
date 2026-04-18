@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import html
+import copy
 import json
 import os
 import re
@@ -23,10 +23,11 @@ from llm_client import (
     chat_text_multi,
     first_submit_overlap_enabled,
     first_submit_passes_from_env,
+    load_config_for_qa,
     load_config_from_env,
+    load_parallel_llm_config_optional,
     maybe_warmup_llm,
 )
-from associations import render_associations_markdown
 from pipeline_bridge import (
     books_to_markdown,
     build_blueprint_from_pipeline,
@@ -37,7 +38,22 @@ from pipeline_bridge import (
 )
 from prompts.registry import system_prompt, user_prompt
 from knowledge_graph import learned_node_id
+from roam_session import (
+    PHASE_PICK_ONE,
+    PHASE_PICK_TWO,
+    build_synthetic_item,
+    finish_roam,
+    format_base_learned_cluster,
+    graph_to_mermaid,
+    learned_lookup_from_list,
+    new_roam_state,
+    prepare_pool3,
+    record_continue,
+    record_first_pair,
+    start_roam,
+)
 from storage import (
+    delete_projects_selective,
     list_projects,
     load_project,
     save_export,
@@ -122,6 +138,11 @@ div[class^="gradio-container-"] {
   font-size: 14px !important;
   /* Tabs 底部分隔线、blockquote 左边线等用 primary 绿；改为中性灰去掉「绿框」感 */
   --border-color-primary: #d0d0cc !important;
+  /* 根容器外沿：压掉 theme 里 panel/block 的 1px 描边（绿 primary 易被看成整页绿框） */
+  --panel-border-width: 0px !important;
+  --block-border-width: 0px !important;
+  border: none !important;
+  outline: none !important;
 }
 
 /* 工作台铺满视口：取消 1280 居中限宽（首页内部仍可用 .landing-anim-wrap 等自控宽度） */
@@ -133,6 +154,8 @@ div[class^="gradio-container-"] .container {
   width: 100% !important;
   margin: 0 !important;
   box-sizing: border-box !important;
+  border: none !important;
+  outline: none !important;
 }
 /* 主列占满可视高度，避免四周大块留白（为 Gradio 底栏预留约 52px） */
 div[class^="gradio-container-"] .wrap {
@@ -142,6 +165,8 @@ div[class^="gradio-container-"] .wrap {
 div[class^="gradio-container-"] main.contain {
   min-height: calc(100vh - 52px) !important;
   min-height: calc(100dvh - 52px) !important;
+  border: none !important;
+  outline: none !important;
 }
 
 /* 勿对 html/body 锁死 height + overflow:hidden：在 Gradio 6 下易把主区压成「白屏」 */
@@ -754,8 +779,6 @@ def _topological_layers(bp: CareerAcademicBlueprint) -> dict[str, int]:
 
 #
 # Note: Old “map/path” visualization utilities were removed.
-# Tree growth is now purely a gamified reward loop (water/fertilizer/growth),
-# not a path/progression UI.
 
 
 def main() -> None:
@@ -772,7 +795,12 @@ def main() -> None:
 
     # Soft 默认 panel 1px + primary 色、块标签 primary_100 底，易被看成「整页绿框」；压成中性描边/标签
     theme = gr.themes.Soft(primary_hue="green", radius_size="lg").set(
+        border_color_primary="*neutral_300",
+        border_color_primary_dark="*neutral_600",
+        block_border_width="0px",
+        block_border_color="*neutral_200",
         panel_border_width="0px",
+        panel_border_width_dark="0px",
         panel_border_color="*neutral_200",
         block_label_background_fill="*neutral_100",
         block_title_background_fill="*neutral_100",
@@ -1010,9 +1038,17 @@ def main() -> None:
                             btn_sidebar_reload = gr.Button("刷新列表", elem_classes=["btn-secondary"])
                             btn_sidebar_open = gr.Button("切换到该项目", elem_classes=["btn-primary"])
                             sidebar_hint = gr.Markdown("_选择后点「切换」即可_")
+                            sidebar_project_delete_cg = gr.CheckboxGroup(
+                                label="勾选要从本机清除的项目（删除 data/projects 下对应文件）",
+                                choices=[],
+                                value=[],
+                            )
+                            btn_sidebar_delete = gr.Button("清除所选", elem_classes=["btn-secondary"])
 
                 with gr.Column(scale=10, elem_classes=["forest-card"], elem_id="project_right_panel"):
-                    with gr.Tabs():
+                    # selected 与下方 TabItem 顺序一致：0 参考书 … 4 节点关联 5 关联漫游
+                    _TAB_NODE_ASSOC = 4
+                    with gr.Tabs() as project_right_tabs:
                         with gr.TabItem("📚 参考书"):
                             books_md = gr.Markdown()
                         with gr.TabItem("📑 大纲"):
@@ -1038,23 +1074,12 @@ def main() -> None:
                                 btn_section_chat_send = gr.Button("发送", elem_classes=["btn-primary"])
                                 btn_section_chat_clear = gr.Button("清空", elem_classes=["btn-secondary"])
                             btn_section_learned = gr.Button("已学会", elem_classes=["btn-secondary"])
-                        with gr.TabItem("🍃 种树"):
-                            tree_html = gr.HTML()
-                            gr.Markdown(
-                                "##### 操作（在这里浇水/施肥）\n"
-                                "_养分仅在 **小节详解** 点 **「已学会」** 获得（首次入库 +1）。"
-                                "全章各节都点过已学会后，在完成本章**最后一个**已学会时额外 +1 肥料。"
-                                "**施肥**消耗 1 养分并晋升成长阶段。_"
-                            )
-                            with gr.Row():
-                                btn_tree_water = gr.Button("浇水", elem_classes=["btn-primary"])
-                                btn_tree_fertilize = gr.Button("施肥", elem_classes=["btn-secondary"])
-
                         with gr.TabItem("🔗 节点关联"):
-                            gr.Markdown("##### 自动关联（提示你可能的连接）")
-                            assoc_md = gr.Markdown()
-                            gr.Markdown("---")
-                            gr.Markdown("##### 自主关联工具（你选两条已学，我来分析桥梁与发散）")
+                            gr.Markdown(
+                                "##### 节点关联\n"
+                                "本页仅保留 **自主关联**：从已学库选两条，点「分析两者关联」生成桥梁与发散；"
+                                "下方可针对该分析继续问答。"
+                            )
                             learned_state = gr.State(value=[])
                             with gr.Row():
                                 btn_learned_reload = gr.Button("刷新已学库", elem_classes=["btn-secondary"])
@@ -1075,17 +1100,49 @@ def main() -> None:
                             with gr.Row():
                                 btn_assoc_chat_send = gr.Button("发送", elem_classes=["btn-primary"])
                                 btn_assoc_chat_clear = gr.Button("清空", elem_classes=["btn-secondary"])
+                        with gr.TabItem("🧭 关联漫游"):
+                            gr.Markdown(
+                                "从**全局已学库**随机抽题：先 6 选 2 做关联，再反复「3 选 1」把新知识点接到上一轮结论上；"
+                                "结束时生成知识网（含**传递关联**：新点与此前基础知识点之间的间接边）。"
+                            )
+                            roam_status_md = gr.Markdown("_先点「开始漫游」。需至少 2 条已学（在「小节详解」点「已学会」）。_")
+                            with gr.Row():
+                                btn_roam_start = gr.Button("开始漫游", elem_classes=["btn-primary"])
+                                btn_roam_finish = gr.Button("结束并生成网络", elem_classes=["btn-secondary"])
+                            roam_pick_two = gr.CheckboxGroup(
+                                label="随机六项中恰好选两个",
+                                choices=[],
+                                value=[],
+                            )
+                            btn_roam_confirm_two = gr.Button("确认两步关联", elem_classes=["btn-primary"])
+                            roam_pick_one = gr.Radio(
+                                label="三选一：与上一轮关联结论继续关联",
+                                choices=[],
+                                value=None,
+                                info="完成首轮关联后，会显示当前「桥梁」名称，便于识别下一轮是在该桥梁上延伸。",
+                            )
+                            btn_roam_confirm_one = gr.Button("确认继续关联", elem_classes=["btn-primary"])
+                            roam_step_md = gr.Markdown("_（最新一轮关联全文）_")
+                            roam_graph_md = gr.Markdown("_（结束后在此查看知识网）_")
+                            roam_replay_dd = gr.Dropdown(
+                                label="回顾本轮关联步骤",
+                                choices=[],
+                                value=None,
+                                interactive=True,
+                                visible=False,
+                            )
+                            roam_replay_md = gr.Markdown(
+                                "_（结束并生成网络后，在此选择某一步即可查看该次关联的全文。）_"
+                            )
 
 
         state_bp = gr.State(value=None)
         state_map = gr.State({"current": None, "visited": []})
-        state_game = gr.State(
-            {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0, "mastered_sections": []}
-        )
         state_pipeline = gr.State(
             {"student": {}, "books": None, "framework": None, "sections": {}, "teaching": {}}
         )
         state_project_id = gr.State(value=None)
+        roam_state = gr.State(new_roam_state())
         # Filled by「信息」页生成；不在「附加」页重复展示表单
         topic = gr.Textbox(visible=False, value="")
         user_context = gr.Textbox(visible=False, value="")
@@ -1112,84 +1169,6 @@ def main() -> None:
 
             return "\n".join(logic)
 
-        def _tree_stage(gs: dict) -> int:
-            """10 stages driven by growth count (chapter completion rewards)."""
-            g = int((gs.get("growth") or 0)) if isinstance(gs, dict) else 0
-            return max(0, min(9, g))
-
-        def _tree_effects(stage: int, fertilizer: int) -> list[str]:
-            eff: list[str] = []
-            if stage >= 2 and fertilizer >= 2:
-                eff.append("🦋 蝴蝶")
-            if stage >= 5 and fertilizer >= 4:
-                eff.append("🌸 开花")
-            if stage >= 8 and fertilizer >= 6:
-                eff.append("🍎 结果")
-            return eff
-
-        def _render_tree_html(pl: dict, ms: dict, gs: dict) -> str:
-            pln = _norm_pipeline(pl)
-            topic_s = ((pln.get("student") or {}).get("topic") or "").strip() or "这棵树"
-            water = int((gs.get("water") or 0)) if isinstance(gs, dict) else 0
-            fert = int((gs.get("fertilizer") or 0)) if isinstance(gs, dict) else 0
-            growth = int((gs.get("growth") or 0)) if isinstance(gs, dict) else 0
-            stage = _tree_stage(gs if isinstance(gs, dict) else {"growth": 0})
-            eff = _tree_effects(stage, fert)
-            eff_s = " · ".join(eff) if eff else "（暂无特效）"
-            prog = f"成长阶段：{growth}（在种树页「施肥」可晋升）"
-            # Stage-based visuals
-            canopy_r = [18, 26, 34, 44, 52, 58, 62, 66, 70, 74][stage]
-            trunk_h = [40, 44, 48, 54, 58, 62, 66, 70, 74, 78][stage]
-            flower_n = 0 if stage < 5 else (2 if stage < 7 else 4)
-            fruit_n = 0 if stage < 8 else (1 if stage < 9 else 2)
-            butterfly = stage >= 6 and fert >= 2
-            # Simple SVG tree (no external assets)
-            w = 520
-            h = 220
-            cx = 150
-            cy = 110
-            canopy = f"<circle cx='{cx}' cy='{cy}' r='{canopy_r}' fill='#7BAE7F' opacity='0.95'/>"
-            canopy2 = f"<circle cx='{cx+36}' cy='{cy+8}' r='{int(canopy_r*0.78)}' fill='#73A978' opacity='0.95'/>"
-            canopy3 = f"<circle cx='{cx-34}' cy='{cy+12}' r='{int(canopy_r*0.72)}' fill='#83B887' opacity='0.95'/>"
-            trunk = f"<rect x='{cx-10}' y='{cy+canopy_r-6}' width='20' height='{trunk_h}' rx='8' fill='#8B5E3C'/>"
-            base = f"<ellipse cx='{cx}' cy='{cy+canopy_r+trunk_h+8}' rx='48' ry='12' fill='#E2E8CE' opacity='0.9'/>"
-            deco = []
-            for i in range(flower_n):
-                fx = cx - 18 + i * 16
-                fy = cy - 6 + (i % 2) * 10
-                deco.append(f"<text x='{fx}' y='{fy}' font-size='16'>🌸</text>")
-            for i in range(fruit_n):
-                fx = cx + 18 + i * 18
-                fy = cy + 10 + (i % 2) * 10
-                deco.append(f"<text x='{fx}' y='{fy}' font-size='16'>🍎</text>")
-            if butterfly:
-                deco.append(f"<text x='{cx+72}' y='{cy-18}' font-size='18'>🦋</text>")
-            svg = (
-                f"<svg viewBox='0 0 {w} {h}' width='100%' height='{h}' xmlns='http://www.w3.org/2000/svg'>"
-                f"<rect x='0' y='0' width='{w}' height='{h}' fill='transparent'/>"
-                + base
-                + trunk
-                + canopy
-                + canopy2
-                + canopy3
-                + "".join(deco)
-                + f"<text x='300' y='58' font-size='16' font-weight='800' fill='#2F3B2F'>阶段 {stage+1}/10</text>"
-                + f"<text x='300' y='84' font-size='13' fill='#4B5563'>{html.escape(prog)}</text>"
-                + f"<text x='300' y='108' font-size='13' fill='#4B5563'>💧浇水：{water} 次</text>"
-                + f"<text x='300' y='132' font-size='13' fill='#4B5563'>🧪肥料：{fert} 次</text>"
-                + f"<text x='300' y='156' font-size='13' fill='#4B5563'>奖励：{html.escape(eff_s)}</text>"
-                + "</svg>"
-            )
-            return (
-                "<div class='forest-card' style='padding:14px 16px; margin-bottom:10px;'>"
-                f"<div style='font-size:1.05rem; font-weight:800;'>🌿 {html.escape(topic_s)} · 个人知识树</div>"
-                f"<div style='margin-top:8px;'>{svg}</div>"
-                "<div style='margin-top:8px; color:#7B7B7B; font-size:0.9rem;'>"
-                "规则：完成小节可浇水/施肥；完成一章会推动阶段成长；每次主动做关联会获得肥料。"
-                "</div>"
-                "</div>"
-            )
-
         def render_with_map(bp: CareerAcademicBlueprint | None, map_state: dict | None):
             # legacy name kept; map UI removed
             # region agent log
@@ -1214,8 +1193,8 @@ def main() -> None:
             # endregion agent log
             return logic, ms
 
-        def _save_only(pid: str | None, pl: dict, ms: dict, gs: dict, bp: CareerAcademicBlueprint | None):
-            return _save_current_project(project_id=pid, pipeline=pl, map_state=ms, game_state=gs, bp=bp)
+        def _save_only(pid: str | None, pl: dict, ms: dict, bp: CareerAcademicBlueprint | None):
+            return _save_current_project(project_id=pid, pipeline=pl, map_state=ms, bp=bp)
 
         def _chapter_dd_from_pl(pl):
             pl = _norm_pipeline(pl)
@@ -1312,10 +1291,8 @@ def main() -> None:
                     gr.update(),
                     gr.update(),
                     gr.update(),
-                    gr.update(),
                     emp,
                     emp,
-                    gr.update(),
                     gr.update(),
                     {"current": None, "visited": []},
                     None,
@@ -1345,6 +1322,7 @@ def main() -> None:
                 progress(0.02, desc="首次生成约需 5～10 分钟，请耐心等待…")
                 progress(0.05, desc="正在准备内容…")
                 cfg = load_config_from_env()
+                cfg_parallel = load_parallel_llm_config_optional()
                 first_passes = first_submit_passes_from_env()
                 overlap = first_submit_overlap_enabled()
                 books_user = user_prompt(
@@ -1366,9 +1344,12 @@ def main() -> None:
                     )
                     books_json_b1 = json.dumps(b1.model_dump(), ensure_ascii=False)
 
+                    cfg_books = cfg_parallel if cfg_parallel is not None else cfg
+                    cfg_outline = cfg
+
                     def _books_refine() -> BooksRecommendResult:
                         return chat_json_multi_continue(
-                            cfg=cfg,
+                            cfg=cfg_books,
                             system=system_prompt("books_recommend"),
                             user=books_user,
                             schema_model=BooksRecommendResult,
@@ -1386,14 +1367,17 @@ def main() -> None:
 
                     def _framework_from_b1() -> ChapterFrameworkResult:
                         return chat_json_multi(
-                            cfg=cfg,
+                            cfg=cfg_outline,
                             system=system_prompt("framework_chapters"),
                             user=fw_user_b1,
                             schema_model=ChapterFrameworkResult,
                             passes=first_passes,
                         )
 
-                    progress(0.2, desc="书单润色与大纲生成并行中（可设 FIRST_SUBMIT_OVERLAP=0 关闭）…")
+                    if cfg_parallel is not None:
+                        progress(0.2, desc="并行：书单走第二通道 + 大纲走主通道…")
+                    else:
+                        progress(0.2, desc="书单润色与大纲生成并行中（可设 FIRST_SUBMIT_OVERLAP=0 关闭）…")
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         fut_b = pool.submit(_books_refine)
                         fut_f = pool.submit(_framework_from_b1)
@@ -1439,15 +1423,13 @@ def main() -> None:
                 _dbg_log("pre-fix", "H2", "app.py:on_pipe_1_books", "about to unpack _full_bp_render", {"expect": 2})
                 # endregion agent log
                 bp, _ = _full_bp_render(pln, fresh)
-                game = {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0, "mastered_sections": []}
-                pid = _save_current_project(project_id=None, pipeline=pln, map_state=fresh, game_state=game, bp=bp)
+                pid = _save_current_project(project_id=None, pipeline=pln, map_state=fresh, bp=bp)
                 return (
                     topic_v,
                     user_ctx,
                     goal_v,
                     "✅ 已完成",
                     pln,
-                    game,
                     books_to_markdown(br),
                     framework_to_markdown(fw),
                     "_（选好章节后继续）_",
@@ -1455,7 +1437,6 @@ def main() -> None:
                     _chapter_dd_from_pl(pln),
                     emp,
                     bp,
-                    _render_tree_html(pln, fresh, game),
                     fresh,
                     pid,
                     f"## 🌳 当前项目：{_project_title_from_pl(pln)}",
@@ -1527,7 +1508,6 @@ def main() -> None:
             chapter_id: str | None,
             pid: str | None,
             ms: dict | None,
-            gs: dict | None,
             progress: gr.Progress = gr.Progress(),
         ):
             def fail(msg: str, plx: dict | None = None):
@@ -1540,7 +1520,6 @@ def main() -> None:
                     f"_{msg}_",
                     gr.update(choices=[], value=None),
                     bp,
-                    _render_tree_html(px, mso, gs or {"water": 0, "fertilizer": 0}),
                     mso,
                     pid,
                 )
@@ -1611,8 +1590,7 @@ def main() -> None:
                 # endregion agent log
                 bp, _ = _full_bp_render(pln, mso)
                 sec_md = chapter_sections_to_markdown(cs_out)
-                gs2 = gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0}
-                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=mso, game_state=gs2, bp=bp)
+                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=mso, bp=bp)
                 progress(1.0, desc="完成")
                 return (
                     "✅ 已更新",
@@ -1620,7 +1598,6 @@ def main() -> None:
                     sec_md,
                     _section_dd_from_pl(pln, cid),
                     bp,
-                    _render_tree_html(pln, mso, gs2),
                     mso,
                     pid2,
                 )
@@ -1708,6 +1685,7 @@ def main() -> None:
         def _gen_teen_loop_stepwise(
             *,
             cfg,
+            cfg_parallel,
             pln: dict,
             sec,
             ch: dict,
@@ -1733,9 +1711,12 @@ def main() -> None:
                 passes=1,
             )
             blocks = _extract_teen_blocks(tpl)
+            cfg_alt = cfg_parallel if cfg_parallel is not None else cfg
 
             def _expand_single_block(i: int) -> tuple[int, str]:
                 title = _TEEN_TITLES[i]
+                # 偶数环节走第二通道（若已配置），与奇数环节错开并发，减轻主网关压力
+                cfg_use = cfg_alt if cfg_alt is not cfg and i % 2 == 0 else cfg
                 seed = (blocks.get(i) or "").strip()
                 if not seed:
                     seed = "（空）"
@@ -1752,7 +1733,7 @@ def main() -> None:
 
                     fb = "；".join(feedback) if feedback else "确保更具体、更贴近生活类比，且字数 300~500 字；注意短段落排版。"
                     cand = chat_text_multi(
-                        cfg=cfg,
+                        cfg=cfg_use,
                         system=system_prompt("teen_learning_loop_expand"),
                         user=user_prompt(
                             "teen_learning_loop_expand",
@@ -1801,7 +1782,6 @@ def main() -> None:
             section_id: str | None,
             pid: str | None,
             ms: dict | None,
-            gs: dict | None,
             progress: gr.Progress = gr.Progress(),
         ):
             def fail(msg: str, plx: dict | None = None):
@@ -1814,7 +1794,6 @@ def main() -> None:
                     f"_{msg}_",
                     "",
                     bp,
-                    _render_tree_html(px, mso, gs or {"water": 0, "fertilizer": 0}),
                     mso,
                     pid,
                 )
@@ -1843,6 +1822,7 @@ def main() -> None:
                 cfg = load_config_from_env()
                 teen_md = _gen_teen_loop_stepwise(
                     cfg=cfg,
+                    cfg_parallel=load_parallel_llm_config_optional(),
                     pln=pln,
                     sec=sec,
                     ch=ch,
@@ -1856,27 +1836,19 @@ def main() -> None:
 
                 mso = ms if isinstance(ms, dict) else {"current": None, "visited": []}
                 bp, _ = _full_bp_render(pln, mso)
-                gs2 = dict(
-                    gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0}
-                )
-                gs2.setdefault("resource", 0)
-                gs2.setdefault("growth", 0)
-                gs2.setdefault("completed_chapters", [])
-                gs2.setdefault("mastered_sections", [])
 
                 visited_set = set(mso.get("visited") or [])
                 visited_set.add(sid)
                 new_ms = {"current": sid, "visited": sorted(visited_set)}
 
-                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=new_ms, game_state=gs2, bp=bp)
+                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=new_ms, bp=bp)
                 progress(1.0, desc="完成")
                 return (
-                    "✅ 已生成讲解（养分请在本节「已学会」领取）",
+                    "✅ 已生成讲解",
                     pln,
                     teen_md,
                     "",
                     bp,
-                    _render_tree_html(pln, new_ms, gs2),
                     new_ms,
                     pid2,
                 )
@@ -1886,14 +1858,12 @@ def main() -> None:
 
         # Removed unused chat clear / bulk node teaching generator (was not wired in UI)
 
-        def on_refresh_node_assoc(bp: CareerAcademicBlueprint | None):
-            if bp is None:
-                return "⚠️ 请先在「信息」里继续几步", "_（暂无蓝图）_"
-            # richer: current-discipline internal + learned-library links
-            learned = load_learned()
-            discipline = (bp.meta.get("topic") or "").strip() or "当前学科"
-            md = render_associations_markdown(bp=bp, learned_items=learned, discipline=discipline)
-            return "✅ 已更新", md
+        def on_open_node_assoc_tab():
+            """Jump to「节点关联」tab; auto keyword-matching was removed as low-signal."""
+            return (
+                gr.update(selected=_TAB_NODE_ASSOC),
+                "💡 已切到「🔗 节点关联」：请用下方「自主关联工具」选两条已学并点「分析两者关联」。",
+            )
 
         def _learned_dropdown_choices(items: list[dict]) -> list[tuple[str, str]]:
             out: list[tuple[str, str]] = []
@@ -1939,29 +1909,13 @@ def main() -> None:
             sid: str | None,
             pid: str | None,
             ms: dict | None,
-            gs: dict | None,
             bp: CareerAcademicBlueprint | None,
         ):
             pln = _norm_pipeline(pl)
             mso = ms if isinstance(ms, dict) else {"current": None, "visited": []}
-            gs2 = dict(gs if isinstance(gs, dict) else {})
-            for k, v in (
-                ("water", 0),
-                ("fertilizer", 0),
-                ("growth", 0),
-                ("resource", 0),
-            ):
-                gs2.setdefault(k, v)
-            gs2.setdefault("completed_chapters", [])
-            gs2.setdefault("mastered_sections", [])
 
             def _out_learned(status: str, items: list[dict]) -> tuple:
-                return (
-                    *_pack_learned_ui(status, items),
-                    gs2,
-                    pid,
-                    _render_tree_html(pln, mso, gs2),
-                )
+                return (*_pack_learned_ui(status, items), pid)
 
             sid2 = (sid or "").strip()
             items0 = load_learned()
@@ -1969,24 +1923,36 @@ def main() -> None:
                 return _out_learned("🟡 请先在「附加」里选好小节", items0)
             if not (pln.get("teaching") or {}).get(sid2):
                 return _out_learned("🟡 请先生成本节讲解（点「下一步」），再点「已学会」", items0)
+            if not pln.get("student"):
+                return _out_learned(
+                    "🟡 请先在「信息」页填写并生成内容，使项目保存到本地后，再点「已学会」。"
+                    "（已学库只记录已保存项目下的条目，未保存会话不会写入。）",
+                    items0,
+                )
+
+            pid2 = _save_current_project(
+                project_id=pid,
+                pipeline=pln,
+                map_state=mso,
+                bp=bp,
+            )
+            pid_for_ref = (pid2 or "").strip()
+            if not pid_for_ref:
+                return _out_learned("🟡 项目未能保存到本地，本次不会写入已学库。", load_learned())
 
             sec_title = sid2
             kpoints: list[str] = []
-            chapter_cid: str | None = None
-            sec_ids_all: list[str] = []
             for cid, raw in (pln.get("sections") or {}).items():
                 try:
                     cs = ChapterSectionsResult.model_validate(raw)
-                    ids = [s.section_id for s in cs.sections]
                     for s in cs.sections:
                         if s.section_id == sid2:
                             sec_title = s.title
                             kpoints = [str(x) for x in (s.knowledge_points or [])]
-                            chapter_cid = cid
-                            sec_ids_all = ids
                             break
-                    if chapter_cid:
-                        break
+                    else:
+                        continue
+                    break
                 except Exception:
                     continue
 
@@ -2002,54 +1968,25 @@ def main() -> None:
                         summary = (pay.teaching.explain or "").strip()[:400]
                     except Exception:
                         summary = ""
-            pid_s = (pid or "").strip() or "local"
             item = {
                 "discipline": disc,
                 "title": str(sec_title).strip() or sid2,
                 "summary": summary or "（本节讲解）",
                 "keywords": kpoints[:20] if kpoints else [],
-                "source_ref": f"{pid_s}:{sid2}",
+                "source_ref": f"{pid_for_ref}:{sid2}",
             }
             if not item["keywords"]:
                 item["keywords"] = [item["title"]]
 
-            prev_mastered = set(str(x) for x in (gs2.get("mastered_sections") or []))
             added = add_learned([item])
             items1 = load_learned()
 
-            if added > 0:
-                gs2["resource"] = int(gs2.get("resource") or 0) + 1
-
-            mastered = set(prev_mastered)
-            mastered.add(sid2)
-            gs2["mastered_sections"] = sorted(mastered)
-
-            chapter_fertilizer = False
-            if chapter_cid and sec_ids_all:
-                all_now = all(s in mastered for s in sec_ids_all)
-                all_prev = all(s in prev_mastered for s in sec_ids_all)
-                if all_now and not all_prev:
-                    gs2["fertilizer"] = int(gs2.get("fertilizer") or 0) + 1
-                    chapter_fertilizer = True
-
-            pid2 = _save_current_project(
-                project_id=pid,
-                pipeline=pln,
-                map_state=mso,
-                game_state=gs2,
-                bp=bp,
-            )
-
             if added <= 0:
                 msg = f"🟡 未新增已学条目（可能已在库中）：{item['title']}"
-                if chapter_fertilizer:
-                    msg += " · 本章已全部标记已学会，额外肥料 +1"
-                return (*_pack_learned_ui(msg, items1), gs2, pid2, _render_tree_html(pln, mso, gs2))
+                return (*_pack_learned_ui(msg, items1), pid2)
 
-            msg = f"✅ 已学会：{item['title']}（已学库 {len(items1)} 条，养分 +1）"
-            if chapter_fertilizer:
-                msg += " · 本章最后一个已学会，额外肥料 +1"
-            return (*_pack_learned_ui(msg, items1), gs2, pid2, _render_tree_html(pln, mso, gs2))
+            msg = f"✅ 已学会：{item['title']}（已学库 {len(items1)} 条）"
+            return (*_pack_learned_ui(msg, items1), pid2)
 
         def on_assoc_analyze_two(
             idx_a: str | None,
@@ -2058,28 +1995,24 @@ def main() -> None:
             pid: str | None,
             pl: dict,
             ms: dict | None,
-            gs: dict | None,
             bp: CareerAcademicBlueprint | None,
             progress: gr.Progress = gr.Progress(),
         ):
             pln = _norm_pipeline(pl)
             mso = ms if isinstance(ms, dict) else {"current": None, "visited": []}
-            gs2 = dict(
-                gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0}
-            )
             a = (idx_a or "").strip()
             b = (idx_b or "").strip()
             if not a or not b:
-                return "🟡 请先选择已学 A 与 B", "_（未选择）_", gs2, _render_tree_html(pln, mso, gs2), pid
+                return "🟡 请先选择已学 A 与 B", "_（未选择）_", pid
             if a == b:
-                return "🟡 A 和 B 需要是两条不同的已学", "_（请选择不同条目）_", gs2, _render_tree_html(pln, mso, gs2), pid
+                return "🟡 A 和 B 需要是两条不同的已学", "_（请选择不同条目）_", pid
             try:
                 ia = int(a)
                 ib = int(b)
                 it_a = items[ia]
                 it_b = items[ib]
             except Exception:
-                return "⚠️ 已学条目索引无效，请先点「刷新已学库」", "", gs2, _render_tree_html(pln, mso, gs2), pid
+                return "⚠️ 已学条目索引无效，请先点「刷新已学库」", "", pid
 
             try:
                 progress(0.08, desc="正在分析两者关联…")
@@ -2107,16 +2040,287 @@ def main() -> None:
                     )
                 except Exception:
                     pass
-                gs2["fertilizer"] = int(gs2.get("fertilizer") or 0) + 1
-                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=mso, game_state=gs2, bp=bp)
+                pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=mso, bp=bp)
                 progress(1.0, desc="完成")
-                return "✅ 已分析（肥料 +1）", body, gs2, _render_tree_html(pln, mso, gs2), pid2
+                return "✅ 已分析", body, pid2
             except LLMError as e:
                 progress(1.0, desc="结束")
-                return f"⚠️ 关联分析失败：{e}", "", gs2, _render_tree_html(pln, mso, gs2), pid
+                return f"⚠️ 关联分析失败：{e}", "", pid
             except Exception as e:
                 progress(1.0, desc="结束")
-                return f"⚠️ 关联分析失败：{e}", "", gs2, _render_tree_html(pln, mso, gs2), pid
+                return f"⚠️ 关联分析失败：{e}", "", pid
+
+        def _roam_assoc_body(it_a: dict, it_b: dict, *, extra_user: str = "") -> str:
+            kw_a = "、".join([str(x) for x in (it_a.get("keywords") or [])][:12])
+            kw_b = "、".join([str(x) for x in (it_b.get("keywords") or [])][:12])
+            u = user_prompt(
+                "assoc_analyze",
+                item_a_title=str(it_a.get("title") or ""),
+                item_a_discipline=str(it_a.get("discipline") or ""),
+                item_a_summary=str(it_a.get("summary") or ""),
+                item_a_keywords=kw_a or "（无）",
+                item_b_title=str(it_b.get("title") or ""),
+                item_b_discipline=str(it_b.get("discipline") or ""),
+                item_b_summary=str(it_b.get("summary") or ""),
+                item_b_keywords=kw_b or "（无）",
+            )
+            ex = (extra_user or "").strip()
+            if ex:
+                u = u + "\n\n---\n" + ex
+            cfg = load_config_from_env()
+            return chat_text_multi(cfg=cfg, system=system_prompt("assoc_analyze"), user=u, temperature=0.45, passes=2)
+
+        def _roam_choice_label(item: dict) -> str:
+            d = str(item.get("discipline") or "").strip()
+            t = str(item.get("title") or "").strip() or "未命名"
+            s = f"{d} · {t}" if d else t
+            return s[:72]
+
+        _ROAM_PICK_ONE_LABEL_DEFAULT = "三选一：与上一轮关联结论继续关联"
+
+        def _roam_markdown_heading_bridge(st: dict, body: str) -> str:
+            vnodes = st.get("virtual_nodes") or []
+            if not vnodes:
+                return (body or "").strip() or "_（无）_"
+            b = str(vnodes[-1].get("bridge_name") or "").strip()
+            text = (body or "").strip()
+            if not b:
+                return text or "_（无）_"
+            return f"### 桥梁：「{b}」\n\n{text}" if text else f"### 桥梁：「{b}」\n\n_（无正文）_"
+
+        def _roam_status_append_bridge(note: str, st: dict) -> str:
+            vnodes = st.get("virtual_nodes") or []
+            if not vnodes:
+                return note
+            b = str(vnodes[-1].get("bridge_name") or "").strip()
+            if not b:
+                return note
+            return f"{note}\n\n**当前桥梁：** 「{b}」"
+
+        def _roam_pick_one_label(st: dict, *, has_choices: bool) -> str:
+            if not has_choices:
+                return _ROAM_PICK_ONE_LABEL_DEFAULT
+            vnodes = st.get("virtual_nodes") or []
+            if not vnodes:
+                return _ROAM_PICK_ONE_LABEL_DEFAULT
+            b = str(vnodes[-1].get("bridge_name") or "").strip() or "（未命名）"
+            return f"三选一：选一个已学知识点，与桥梁「{b}」继续关联"
+
+        def _roam_replay_cleared():
+            """Hide replay UI while roaming / before finish."""
+            return (
+                gr.update(choices=[], value=None, visible=False),
+                "_（结束并生成网络后，在此选择某一步即可查看该次关联的全文。）_",
+            )
+
+        def _roam_replay_after_finish(st: dict) -> tuple:
+            """Populate replay dropdown + first step markdown after graph is built."""
+            vnodes = st.get("virtual_nodes") or []
+            if not vnodes:
+                return (
+                    gr.update(choices=[], value=None, visible=False),
+                    "_（本次没有可回顾的关联步骤。）_",
+                )
+            choices: list[tuple[str, str]] = []
+            for i, vn in enumerate(vnodes):
+                bid = str(vn.get("bridge_name") or vn.get("one_liner") or vn.get("id") or "").strip() or f"步骤{i + 1}"
+                lab = f"第 {i + 1} 步：「{bid[:40]}」"
+                choices.append((lab, str(vn.get("id") or "")))
+            first = vnodes[0]
+            inner = {"virtual_nodes": [first]}
+            md0 = _roam_markdown_heading_bridge(inner, str(first.get("markdown") or ""))
+            return (
+                gr.update(choices=choices, value=str(first.get("id") or ""), visible=True, interactive=True),
+                md0,
+            )
+
+        def on_roam_replay_select(sel_id: str | None, rs):
+            st = copy.deepcopy(rs) if isinstance(rs, dict) else new_roam_state()
+            vnodes = st.get("virtual_nodes") or []
+            sid = (sel_id or "").strip()
+            if not vnodes:
+                return "_（无关联步骤）_"
+            if not sid:
+                sid = str(vnodes[0].get("id") or "")
+            for vn in vnodes:
+                if str(vn.get("id") or "") == sid:
+                    inner = {"virtual_nodes": [vn]}
+                    return _roam_markdown_heading_bridge(inner, str(vn.get("markdown") or ""))
+            return "_（未找到该步）_"
+
+        def on_roam_start():
+            learned = load_learned()
+            st, msg = start_roam(learned)
+            if st is None:
+                return (
+                    new_roam_state(),
+                    msg,
+                    gr.update(choices=[], value=[]),
+                    gr.update(choices=[], value=None, label=_ROAM_PICK_ONE_LABEL_DEFAULT),
+                    "_（尚无关联步骤）_",
+                    "_（尚未生成网络）_",
+                ) + _roam_replay_cleared()
+            choices = [(_roam_choice_label(p["item"]), p["id"]) for p in st["pool6"]]
+            return (
+                st,
+                msg,
+                gr.update(choices=choices, value=[]),
+                gr.update(choices=[], value=None, label=_ROAM_PICK_ONE_LABEL_DEFAULT),
+                "_（勾选两项后点「确认两步关联」）_",
+                "_（结束后在此查看知识网）_",
+            ) + _roam_replay_cleared()
+
+        def on_roam_confirm_two(rs, picked, progress: gr.Progress = gr.Progress()):
+            learned = load_learned()
+            st = copy.deepcopy(rs) if isinstance(rs, dict) else new_roam_state()
+            if (st.get("phase") or "") != PHASE_PICK_TWO:
+                return (
+                    st,
+                    "🟡 请先点「开始漫游」。",
+                    gr.update(),
+                    gr.update(),
+                    "_（无）_",
+                    gr.update(),
+                ) + _roam_replay_cleared()
+            ids = list(picked or [])
+            if len(ids) != 2:
+                return (
+                    st,
+                    "🟡 请恰好勾选 **2** 个知识点。",
+                    gr.update(),
+                    gr.update(),
+                    "_（无）_",
+                    gr.update(),
+                ) + _roam_replay_cleared()
+            if ids[0] == ids[1]:
+                return (st, "🟡 请选择两个不同的知识点。", gr.update(), gr.update(), "_（无）_", gr.update()) + _roam_replay_cleared()
+            pool = {p["id"]: p["item"] for p in st.get("pool6") or []}
+            if ids[0] not in pool or ids[1] not in pool:
+                return (st, "🟡 选择无效，请重新开始漫游。", gr.update(), gr.update(), "_（无）_", gr.update()) + _roam_replay_cleared()
+            it_a, it_b = dict(pool[ids[0]]), dict(pool[ids[1]])
+            try:
+                progress(0.1, desc="关联分析中…")
+                body = _roam_assoc_body(it_a, it_b)
+                try:
+                    upsert_assoc_edge(
+                        item_a=it_a,
+                        item_b=it_b,
+                        analysis_preview=body,
+                        node_id_fn=learned_node_id,
+                    )
+                except Exception:
+                    pass
+                record_first_pair(st, ids[0], ids[1], body)
+                prepare_pool3(st, learned)
+                p3 = st.get("pool3") or []
+                if not p3:
+                    note0 = "🟡 没有可继续的「三选一」候选（已全部用过或已学库不足）。请点「结束并生成网络」。"
+                    c3: list = []
+                    v3 = None
+                else:
+                    note0 = "✅ 已完成第一步关联。" + (
+                        " " + st.get("next_pool_notice", "").strip() if st.get("next_pool_notice") else ""
+                    )
+                    c3 = [(_roam_choice_label(p["item"]), p["id"]) for p in p3]
+                    v3 = None
+                note = _roam_status_append_bridge(note0, st)
+                step_md = _roam_markdown_heading_bridge(st, body)
+                pick_label = _roam_pick_one_label(st, has_choices=bool(c3))
+                return (
+                    st,
+                    note,
+                    gr.update(choices=[], value=[]),
+                    gr.update(choices=c3, value=v3, label=pick_label),
+                    step_md,
+                    gr.update(),
+                ) + _roam_replay_cleared()
+            except LLMError as e:
+                progress(1.0, desc="结束")
+                return (st, f"⚠️ 关联分析失败：{e}", gr.update(), gr.update(), "_（未写入步骤）_", gr.update()) + _roam_replay_cleared()
+            except Exception as e:
+                progress(1.0, desc="结束")
+                return (st, f"⚠️ 关联分析失败：{e}", gr.update(), gr.update(), "_（未写入步骤）_", gr.update()) + _roam_replay_cleared()
+
+        def on_roam_confirm_one(rs, one_id: str | None, progress: gr.Progress = gr.Progress()):
+            learned = load_learned()
+            st = copy.deepcopy(rs) if isinstance(rs, dict) else new_roam_state()
+            if (st.get("phase") or "") != PHASE_PICK_ONE:
+                return (
+                    st,
+                    "🟡 当前不在「三选一」阶段。",
+                    gr.update(),
+                    gr.update(),
+                    "_（无）_",
+                    gr.update(),
+                ) + _roam_replay_cleared()
+            oid = (one_id or "").strip()
+            if not oid:
+                return (st, "🟡 请先选择一个候选知识点。", gr.update(), gr.update(), "_（无）_", gr.update()) + _roam_replay_cleared()
+            vnodes = st.get("virtual_nodes") or []
+            if not vnodes:
+                return (st, "🟡 尚无上一轮结论。", gr.update(), gr.update(), "_（无）_", gr.update()) + _roam_replay_cleared()
+            prev = vnodes[-1]
+            prev_vid = str(prev.get("id") or "")
+            z_item = None
+            for p in st.get("pool3") or []:
+                if p.get("id") == oid:
+                    z_item = dict(p["item"])
+                    break
+            if z_item is None:
+                return (st, "🟡 选择无效，请重新点「开始漫游」或结束。", gr.update(), gr.update(), "_（无）_", gr.update()) + _roam_replay_cleared()
+            lk_roam = learned_lookup_from_list(learned)
+            cluster = format_base_learned_cluster(list(prev.get("base_learned_ids") or []), lk_roam)
+            syn = build_synthetic_item(str(prev.get("markdown") or ""), prev, learned=learned)
+            try:
+                progress(0.1, desc="延续关联分析中…")
+                body = _roam_assoc_body(syn, z_item, extra_user=cluster)
+                record_continue(st, prev_vid, oid, body)
+                prepare_pool3(st, learned)
+                p3 = st.get("pool3") or []
+                if not p3:
+                    note0 = "✅ 已延续一步。没有更多三选一候选，请点「结束并生成网络」。"
+                    c3: list = []
+                    v3 = None
+                else:
+                    note0 = "✅ 已延续一步。" + (
+                        " " + st.get("next_pool_notice", "").strip() if st.get("next_pool_notice") else ""
+                    )
+                    c3 = [(_roam_choice_label(p["item"]), p["id"]) for p in p3]
+                    v3 = None
+                note = _roam_status_append_bridge(note0, st)
+                step_md = _roam_markdown_heading_bridge(st, body)
+                pick_label = _roam_pick_one_label(st, has_choices=bool(c3))
+                return (
+                    st,
+                    note,
+                    gr.update(),
+                    gr.update(choices=c3, value=v3, label=pick_label),
+                    step_md,
+                    gr.update(),
+                ) + _roam_replay_cleared()
+            except LLMError as e:
+                progress(1.0, desc="结束")
+                return (st, f"⚠️ 关联分析失败：{e}", gr.update(), gr.update(), "_（未写入步骤）_", gr.update()) + _roam_replay_cleared()
+            except Exception as e:
+                progress(1.0, desc="结束")
+                return (st, f"⚠️ 关联分析失败：{e}", gr.update(), gr.update(), "_（未写入步骤）_", gr.update()) + _roam_replay_cleared()
+
+        def on_roam_finish(rs):
+            st = copy.deepcopy(rs) if isinstance(rs, dict) else new_roam_state()
+            finish_roam(st)
+            learned = load_learned()
+            lk = learned_lookup_from_list(learned)
+            graph_md = graph_to_mermaid(st, lk)
+            if not (st.get("virtual_nodes") or []):
+                graph_md = "_（本次尚未完成任何关联步骤）_\n\n" + graph_md
+            return (
+                st,
+                "✅ 已结束漫游；下方为本次知识网（Mermaid）。",
+                gr.update(choices=[], value=[]),
+                gr.update(choices=[], value=None, label=_ROAM_PICK_ONE_LABEL_DEFAULT),
+                gr.update(),
+                graph_md,
+            ) + _roam_replay_after_finish(st)
 
         def _section_context_markdown(pl: dict, sid: str) -> str:
             pln = _norm_pipeline(pl)
@@ -2208,7 +2412,6 @@ def main() -> None:
             user_q: str,
             pid: str | None,
             ms: dict | None,
-            gs: dict | None,
             bp: CareerAcademicBlueprint | None,
             progress: gr.Progress = gr.Progress(),
         ):
@@ -2239,7 +2442,7 @@ def main() -> None:
                 )
                 # endregion agent log
                 progress(0.08, desc="助教思考中…")
-                cfg = load_config_from_env()
+                cfg = load_config_for_qa()
                 # region agent log
                 _dbg_log(
                     "section-qa-debug",
@@ -2278,7 +2481,6 @@ def main() -> None:
                     project_id=pid,
                     pipeline=pln,
                     map_state=ms if isinstance(ms, dict) else {"current": None, "visited": []},
-                    game_state=gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0},
                     bp=bp,
                 )
                 progress(1.0, desc="完成")
@@ -2328,7 +2530,7 @@ def main() -> None:
                     _norm_pipeline(pl),
                 )
 
-        def on_section_chat_clear(pid: str | None, pl: dict, sid: str | None, ms: dict | None, gs: dict | None, bp: CareerAcademicBlueprint | None):
+        def on_section_chat_clear(pid: str | None, pl: dict, sid: str | None, ms: dict | None, bp: CareerAcademicBlueprint | None):
             sid2 = (sid or "").strip()
             pln = _norm_pipeline(pl)
             if sid2:
@@ -2344,20 +2546,17 @@ def main() -> None:
                 project_id=pid,
                 pipeline=pln,
                 map_state=ms if isinstance(ms, dict) else {"current": None, "visited": []},
-                game_state=gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0},
                 bp=bp,
             )
             return "🧹 已清空本节问答", [], "", pid2, pln
 
         def on_assoc_chat_send(
             pl: dict,
-            assoc_auto: str,
             assoc_tool: str,
             hist: list | None,
             user_q: str,
             pid: str | None,
             ms: dict | None,
-            gs: dict | None,
             bp: CareerAcademicBlueprint | None,
             progress: gr.Progress = gr.Progress(),
         ):
@@ -2365,16 +2564,13 @@ def main() -> None:
             if not q:
                 return gr.update(), _section_chat_normalize(hist), "", pid, _norm_pipeline(pl)
             ctx_parts: list[str] = []
-            auto_s = (assoc_auto or "").strip()
             tool_s = (assoc_tool or "").strip()
-            if auto_s:
-                ctx_parts.append("## 自动关联\n" + auto_s)
             if tool_s:
                 ctx_parts.append("## 自主关联分析\n" + tool_s)
-            context = "\n\n".join(ctx_parts) if ctx_parts else "（暂无关联内容，请先点「知识关联」生成）"
+            context = "\n\n".join(ctx_parts) if ctx_parts else "（暂无关联分析，请先用「分析两者关联」生成一段内容）"
             try:
                 progress(0.08, desc="关联助教思考中…")
-                cfg = load_config_from_env()
+                cfg = load_config_for_qa()
                 htext = _history_to_text(hist or [])
                 ans = chat_text_multi(
                     cfg=cfg,
@@ -2393,7 +2589,6 @@ def main() -> None:
                     project_id=pid,
                     pipeline=pln,
                     map_state=ms if isinstance(ms, dict) else {"current": None, "visited": []},
-                    game_state=gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0},
                     bp=bp,
                 )
                 progress(1.0, desc="完成")
@@ -2411,7 +2606,7 @@ def main() -> None:
                     _norm_pipeline(pl),
                 )
 
-        def on_assoc_chat_clear(pid: str | None, pl: dict, ms: dict | None, gs: dict | None, bp: CareerAcademicBlueprint | None):
+        def on_assoc_chat_clear(pid: str | None, pl: dict, ms: dict | None, bp: CareerAcademicBlueprint | None):
             pln = _norm_pipeline(pl)
             try:
                 if isinstance(pln.get("chats"), dict):
@@ -2422,7 +2617,6 @@ def main() -> None:
                 project_id=pid,
                 pipeline=pln,
                 map_state=ms if isinstance(ms, dict) else {"current": None, "visited": []},
-                game_state=gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0},
                 bp=bp,
             )
             return "🧹 已清空关联问答", [], "", pid2, pln
@@ -2488,8 +2682,6 @@ def main() -> None:
                 return "⚠️ 导出失败"
             return "✅ 导出成功（已写入本地导出目录）"
 
-        # Removed legacy “map progression” actions. Tree growth is driven by rewards only.
-
         def _confetti_html() -> str:
             cols = ["#7BAE7F", "#F4D03F", "#A7D7C5", "#E2E8CE", "#F59E0B"]
             parts = ["<div class='celebrate'>"]
@@ -2503,29 +2695,6 @@ def main() -> None:
                 )
             parts.append("</div>")
             return "".join(parts)
-
-        def on_tree_apply(action: str, pid: str | None, pl: dict, ms: dict | None, gs: dict | None, bp: CareerAcademicBlueprint | None):
-            pln = _norm_pipeline(pl)
-            mso = ms if isinstance(ms, dict) else {"current": None, "visited": []}
-            gs2 = dict(
-                gs if isinstance(gs, dict) else {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0}
-            )
-            gs2.setdefault("resource", 0)
-            gs2.setdefault("mastered_sections", [])
-            if int(gs2.get("resource") or 0) <= 0:
-                return "🟡 还没有养分：请在「小节详解」对已完成讲解的小节点「已学会」", _render_tree_html(pln, mso, gs2), gs2, pid
-
-            gs2["resource"] = int(gs2.get("resource") or 0) - 1
-            if action == "water":
-                gs2["water"] = int(gs2.get("water") or 0) + 1
-                msg = "💧 已浇水（消耗 1 点养分）"
-            else:
-                gs2["fertilizer"] = int(gs2.get("fertilizer") or 0) + 1
-                gs2["growth"] = int(gs2.get("growth") or 0) + 1
-                msg = "🧪 已施肥（消耗 1 点养分，成长阶段 +1）"
-
-            pid2 = _save_current_project(project_id=pid, pipeline=pln, map_state=mso, game_state=gs2, bp=bp)
-            return msg, _render_tree_html(pln, mso, gs2), gs2, pid2
 
         def _project_progress_tag(pl: dict) -> str:
             pln = _norm_pipeline(pl)
@@ -2545,7 +2714,11 @@ def main() -> None:
         def _sidebar_project_choices():
             items = list_projects()
             if not items:
-                return gr.update(choices=[], value=None), "_暂无项目。先点「创建新项目」或在「信息」页开始生成。_"
+                return (
+                    gr.update(choices=[], value=None),
+                    "_暂无项目。先点「创建新项目」或在「信息」页开始生成。_",
+                    gr.update(choices=[], value=[]),
+                )
             choices: list[tuple[str, str]] = []
             for x in items:
                 raw = load_project(x.project_id)
@@ -2553,10 +2726,33 @@ def main() -> None:
                 tag = _project_progress_tag(pl)
                 label = f"{x.title} · {tag}（{x.updated_at or x.project_id}）"
                 choices.append((label, x.project_id))
-            return gr.update(choices=choices, value=None), f"_共 {len(items)} 个项目；最近打开过的会排在前列。_"
+            return (
+                gr.update(choices=choices, value=None),
+                f"_共 {len(items)} 个项目；最近打开过的会排在前列。可在下方多选后点「清除所选」删除本地文件。_",
+                gr.update(choices=choices, value=[]),
+            )
 
         def on_inprogress_reload_sidebar():
             return _sidebar_project_choices()
+
+        def on_sidebar_delete_projects(selected_ids: list, cur_pid: str | None):
+            ids = [str(x).strip() for x in (selected_ids or []) if str(x).strip()]
+            if not ids:
+                dd_u, hint_u, cg_u = _sidebar_project_choices()
+                return "🟡 请先在下方勾选至少一个项目", dd_u, hint_u, cg_u, gr.update()
+            deleted, n_l = delete_projects_selective(ids)
+            dd_u, hint_u, cg_u = _sidebar_project_choices()
+            if not deleted:
+                return "🟡 没有成功删除的项目（可能文件已不存在）", dd_u, hint_u, cg_u, gr.update()
+            cur = (cur_pid or "").strip()
+            hit = bool(cur and cur in set(deleted))
+            msg = f"✅ 已从本机删除 {len(deleted)} 个项目"
+            if n_l:
+                msg += f"；已学库中已移除 {n_l} 条与这些项目绑定的记录"
+            if hit:
+                msg += "。**当前打开的项目已被删除**，请点「创建新项目」或从上方选择其它项目后点「切换」。"
+            new_pid = None if hit else cur_pid
+            return msg, dd_u, hint_u, cg_u, new_pid
 
         def go_landing():
             return _show_page("landing")
@@ -2568,31 +2764,20 @@ def main() -> None:
         btn_go_project.click(go_project, outputs=[landing_p, project_p])
         btn_back_home.click(go_landing, outputs=[landing_p, project_p])
 
-        btn_node_assoc.click(on_refresh_node_assoc, inputs=[state_bp], outputs=[status, assoc_md]).then(
-            _save_only, inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp], outputs=[state_project_id]
+        btn_node_assoc.click(
+            on_open_node_assoc_tab,
+            outputs=[project_right_tabs, status],
+        ).then(
+            _save_only, inputs=[state_project_id, state_pipeline, state_map, state_bp], outputs=[state_project_id]
         )
         btn_learned_reload.click(on_learned_reload, outputs=[status, learned_state, assoc_a, assoc_b, assoc_tool_md])
         btn_assoc_analyze.click(
             on_assoc_analyze_two,
-            inputs=[assoc_a, assoc_b, learned_state, state_project_id, state_pipeline, state_map, state_game, state_bp],
-            outputs=[status, assoc_tool_md, state_game, tree_html, state_project_id],
+            inputs=[assoc_a, assoc_b, learned_state, state_project_id, state_pipeline, state_map, state_bp],
+            outputs=[status, assoc_tool_md, state_project_id],
             show_progress="full",
         )
-        # Removed legacy “map progression” wiring.
         btn_export.click(on_export, inputs=[state_pipeline, state_bp], outputs=[status])
-
-        btn_tree_water.click(
-            lambda pid, pl, ms, gs, bp: on_tree_apply("water", pid, pl, ms, gs, bp),
-            inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp],
-            outputs=[status, tree_html, state_game, state_project_id],
-            show_progress="minimal",
-        )
-        btn_tree_fertilize.click(
-            lambda pid, pl, ms, gs, bp: on_tree_apply("fertilize", pid, pl, ms, gs, bp),
-            inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp],
-            outputs=[status, tree_html, state_game, state_project_id],
-            show_progress="minimal",
-        )
 
         btn_section_chat_send.click(
             on_section_chat_send,
@@ -2603,7 +2788,6 @@ def main() -> None:
                 section_chat_in,
                 state_project_id,
                 state_map,
-                state_game,
                 state_bp,
             ],
             outputs=[status, section_chat_state, section_chat_in, state_project_id, state_pipeline],
@@ -2618,7 +2802,6 @@ def main() -> None:
                 section_chat_in,
                 state_project_id,
                 state_map,
-                state_game,
                 state_bp,
             ],
             outputs=[status, section_chat_state, section_chat_in, state_project_id, state_pipeline],
@@ -2627,27 +2810,25 @@ def main() -> None:
 
         btn_section_chat_clear.click(
             on_section_chat_clear,
-            inputs=[state_project_id, state_pipeline, pipe_section, state_map, state_game, state_bp],
+            inputs=[state_project_id, state_pipeline, pipe_section, state_map, state_bp],
             outputs=[status, section_chat_state, section_chat_in, state_project_id, state_pipeline],
             show_progress="minimal",
         ).then(lambda h: h, inputs=[section_chat_state], outputs=[section_chat])
 
         btn_section_learned.click(
             on_section_mark_learned,
-            inputs=[state_pipeline, pipe_section, state_project_id, state_map, state_game, state_bp],
-            outputs=[status, learned_state, assoc_a, assoc_b, assoc_tool_md, state_game, state_project_id, tree_html],
+            inputs=[state_pipeline, pipe_section, state_project_id, state_map, state_bp],
+            outputs=[status, learned_state, assoc_a, assoc_b, assoc_tool_md, state_project_id],
             show_progress="minimal",
         )
 
         _assoc_chat_inputs = [
             state_pipeline,
-            assoc_md,
             assoc_tool_md,
             assoc_chat_state,
             assoc_chat_in,
             state_project_id,
             state_map,
-            state_game,
             state_bp,
         ]
         _assoc_chat_outputs = [status, assoc_chat_state, assoc_chat_in, state_project_id, state_pipeline]
@@ -2665,10 +2846,41 @@ def main() -> None:
         ).then(lambda h: h, inputs=[assoc_chat_state], outputs=[assoc_chat])
         btn_assoc_chat_clear.click(
             on_assoc_chat_clear,
-            inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp],
+            inputs=[state_project_id, state_pipeline, state_map, state_bp],
             outputs=[status, assoc_chat_state, assoc_chat_in, state_project_id, state_pipeline],
             show_progress="minimal",
         ).then(lambda h: h, inputs=[assoc_chat_state], outputs=[assoc_chat])
+
+        _roam_outs = [
+            roam_state,
+            roam_status_md,
+            roam_pick_two,
+            roam_pick_one,
+            roam_step_md,
+            roam_graph_md,
+            roam_replay_dd,
+            roam_replay_md,
+        ]
+        btn_roam_start.click(on_roam_start, outputs=_roam_outs)
+        btn_roam_confirm_two.click(
+            on_roam_confirm_two,
+            inputs=[roam_state, roam_pick_two],
+            outputs=_roam_outs,
+            show_progress="full",
+        )
+        btn_roam_confirm_one.click(
+            on_roam_confirm_one,
+            inputs=[roam_state, roam_pick_one],
+            outputs=_roam_outs,
+            show_progress="full",
+        )
+        btn_roam_finish.click(on_roam_finish, inputs=[roam_state], outputs=_roam_outs)
+        roam_replay_dd.change(
+            on_roam_replay_select,
+            inputs=[roam_replay_dd, roam_state],
+            outputs=[roam_replay_md],
+            show_progress="hidden",
+        )
 
         # 信息页：按步生成（内部仍称 pipeline）
         (
@@ -2696,7 +2908,6 @@ def main() -> None:
                     goal,
                     status,
                     state_pipeline,
-                    state_game,
                     books_md,
                     framework_md,
                     chapter_sections_md,
@@ -2704,7 +2915,6 @@ def main() -> None:
                     pipe_chapter,
                     pipe_section,
                     state_bp,
-                    tree_html,
                     state_map,
                     state_project_id,
                     project_title_display,
@@ -2720,8 +2930,6 @@ def main() -> None:
             if not pid:
                 return (
                     "🟡 请选择一个项目",
-                    gr.update(),
-                    gr.update(),
                     gr.update(),
                     gr.update(),
                     gr.update(),
@@ -2755,14 +2963,9 @@ def main() -> None:
                     gr.update(),
                     gr.update(),
                     gr.update(),
-                    gr.update(),
-                    gr.update(),
                 )
             pln = _norm_pipeline((raw.get("pipeline") or {}))
             ms = raw.get("map_state") if isinstance(raw.get("map_state"), dict) else {"current": None, "visited": []}
-            gs = raw.get("game_state") if isinstance(raw.get("game_state"), dict) else {"water": 0, "fertilizer": 0, "growth": 0, "completed_chapters": [], "resource": 0}
-            gs.setdefault("mastered_sections", [])
-            gs.setdefault("resource", 0)
             bp_raw = raw.get("bp")
             bp = CareerAcademicBlueprint.model_validate(bp_raw) if bp_raw else build_blueprint_from_pipeline(pln)
             mss = ms if isinstance(ms, dict) else {"current": None, "visited": []}
@@ -2818,7 +3021,6 @@ def main() -> None:
                 pln,
                 bp,
                 mss,
-                gs,
                 pid,
                 title_md,
                 books_md_s,
@@ -2828,43 +3030,32 @@ def main() -> None:
                 teen_loop_md_s,
                 ch_choices,
                 sec_dd,
-                _render_tree_html(pln, mss, gs),
                 assoc_hist,
                 assoc_hist,
             )
 
-        def on_inprogress_open(sel_pid, cur_pid, pl, ms, gs, bp):
+        def on_inprogress_open(sel_pid, cur_pid, pl, ms, bp):
             cur = (cur_pid or "").strip()
             if cur:
-                _save_current_project(project_id=cur, pipeline=pl, map_state=ms, game_state=gs, bp=bp)
+                _save_current_project(project_id=cur, pipeline=pl, map_state=ms, bp=bp)
             out = _load_project_into_workspace(sel_pid)
             if out[0] == "✅ 已打开":
-                touch_last_opened(str(out[5]))
+                touch_last_opened(str(out[4]))
             return out
 
-        def on_create_new_project(cur_pid, pl, ms, gs, bp):
+        def on_create_new_project(cur_pid, pl, ms, bp):
             cur = (cur_pid or "").strip()
             if cur:
-                _save_current_project(project_id=cur, pipeline=pl, map_state=ms, game_state=gs, bp=bp)
+                _save_current_project(project_id=cur, pipeline=pl, map_state=ms, bp=bp)
             pl0: dict = {"student": {}, "books": None, "framework": None, "sections": {}, "teaching": {}}
             ms0 = {"current": None, "visited": []}
-            gs0 = {
-                "water": 0,
-                "fertilizer": 0,
-                "growth": 0,
-                "completed_chapters": [],
-                "resource": 0,
-                "mastered_sections": [],
-            }
             tp = "_（暂无）_"
             ch0 = gr.update(choices=[], value=None)
             sec0 = gr.update(choices=[], value=None)
-            tree = _render_tree_html(pl0, ms0, gs0)
             return (
                 pl0,
                 None,
                 ms0,
-                gs0,
                 None,
                 "## 🌳 当前项目：未命名",
                 tp,
@@ -2872,12 +3063,12 @@ def main() -> None:
                 tp,
                 "_（选好章节后继续）_",
                 "_（选好小节后继续）_",
-                "",
                 ch0,
                 sec0,
-                tree,
                 [],
                 [],
+                gr.update(value=""),
+                gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=""),
@@ -2894,7 +3085,6 @@ def main() -> None:
             state_pipeline,
             state_bp,
             state_map,
-            state_game,
             state_project_id,
             project_title_display,
             books_md,
@@ -2904,7 +3094,6 @@ def main() -> None:
             teen_loop_md,
             pipe_chapter,
             pipe_section,
-            tree_html,
             assoc_chat_state,
             assoc_chat,
             topic,
@@ -2922,20 +3111,19 @@ def main() -> None:
         ]
         btn_new_project.click(
             on_create_new_project,
-            inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp],
+            inputs=[state_project_id, state_pipeline, state_map, state_bp],
             outputs=_new_project_outputs,
             show_progress="minimal",
         )
         btn_pipe_3.click(
             on_pipe_3_sections,
-            inputs=[state_pipeline, pipe_chapter, state_project_id, state_map, state_game],
+            inputs=[state_pipeline, pipe_chapter, state_project_id, state_map],
             outputs=[
                 status,
                 state_pipeline,
                 chapter_sections_md,
                 pipe_section,
                 state_bp,
-                tree_html,
                 state_map,
                 state_project_id,
             ],
@@ -2943,14 +3131,13 @@ def main() -> None:
         )
         btn_pipe_4.click(
             on_pipe_4_teaching,
-            inputs=[state_pipeline, pipe_section, state_project_id, state_map, state_game],
+            inputs=[state_pipeline, pipe_section, state_project_id, state_map],
             outputs=[
                 status,
                 state_pipeline,
                 section_expand_md,
                 teen_loop_md,
                 state_bp,
-                tree_html,
                 state_map,
                 state_project_id,
             ],
@@ -2960,14 +3147,14 @@ def main() -> None:
             on_pipe_chapter_changed,
             inputs=[state_pipeline, pipe_chapter],
             outputs=[chapter_sections_md, pipe_section, section_expand_md, teen_loop_md],
-        ).then(_save_only, inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp], outputs=[state_project_id])
+        ).then(_save_only, inputs=[state_project_id, state_pipeline, state_map, state_bp], outputs=[state_project_id])
 
         pipe_section.change(
             on_pipe_section_changed,
             inputs=[state_pipeline, pipe_section],
             outputs=[section_chat_state, section_chat, section_chat_in, section_expand_md, teen_loop_md],
             show_progress="hidden",
-        ).then(_save_only, inputs=[state_project_id, state_pipeline, state_map, state_game, state_bp], outputs=[state_project_id])
+        ).then(_save_only, inputs=[state_project_id, state_pipeline, state_map, state_bp], outputs=[state_project_id])
 
         # Left-side switch buttons (toggle pages)
         def show_left_chat():
@@ -2983,16 +3170,25 @@ def main() -> None:
         btn_left_chat.click(show_left_chat, outputs=_left_pages)
         btn_left_settings.click(show_left_settings, outputs=_left_pages)
         btn_left_projects.click(show_left_projects, outputs=_left_pages).then(
-            on_inprogress_reload_sidebar, outputs=[sidebar_project_pick, sidebar_hint]
+            on_inprogress_reload_sidebar,
+            outputs=[sidebar_project_pick, sidebar_hint, sidebar_project_delete_cg],
         )
-        btn_sidebar_reload.click(on_inprogress_reload_sidebar, outputs=[sidebar_project_pick, sidebar_hint])
+        btn_sidebar_reload.click(
+            on_inprogress_reload_sidebar,
+            outputs=[sidebar_project_pick, sidebar_hint, sidebar_project_delete_cg],
+        )
+        btn_sidebar_delete.click(
+            on_sidebar_delete_projects,
+            inputs=[sidebar_project_delete_cg, state_project_id],
+            outputs=[status, sidebar_project_pick, sidebar_hint, sidebar_project_delete_cg, state_project_id],
+            show_progress="minimal",
+        )
 
         _sidebar_open_outputs = [
             status,
             state_pipeline,
             state_bp,
             state_map,
-            state_game,
             state_project_id,
             project_title_display,
             books_md,
@@ -3002,13 +3198,12 @@ def main() -> None:
             teen_loop_md,
             pipe_chapter,
             pipe_section,
-            tree_html,
             assoc_chat_state,
             assoc_chat,
         ]
         btn_sidebar_open.click(
             on_inprogress_open,
-            inputs=[sidebar_project_pick, state_project_id, state_pipeline, state_map, state_game, state_bp],
+            inputs=[sidebar_project_pick, state_project_id, state_pipeline, state_map, state_bp],
             outputs=_sidebar_open_outputs,
             show_progress="minimal",
         )

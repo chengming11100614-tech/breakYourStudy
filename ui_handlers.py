@@ -46,7 +46,6 @@ def save_current_project(
     project_id: str | None,
     pipeline: dict[str, Any],
     map_state: dict[str, Any] | None,
-    game_state: dict[str, Any] | None,
     bp: CareerAcademicBlueprint | None,
 ) -> str | None:
     pln = norm_pipeline(pipeline)
@@ -66,7 +65,6 @@ def save_current_project(
             "meta": meta,
             "pipeline": pln,
             "map_state": ms,
-            "game_state": game_state if isinstance(game_state, dict) else None,
             "bp": bp.model_dump() if bp else None,
         },
     )

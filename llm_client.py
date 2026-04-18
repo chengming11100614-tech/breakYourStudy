@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 from openai import OpenAI
@@ -45,6 +45,43 @@ def load_config_from_env() -> LLMConfig:
         raise LLMError("Missing BASE_URL / API_KEY / MODEL in environment.")
     request_timeout_s = int(os.getenv("REQUEST_TIMEOUT_S") or "60")
     max_retries = int(os.getenv("MAX_RETRIES") or "2")
+    return LLMConfig(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        request_timeout_s=request_timeout_s,
+        max_retries=max_retries,
+    )
+
+
+def load_config_for_qa() -> LLMConfig:
+    """
+    Multi-turn Q&A (小节问答、关联问答等)：与主通道同一 BASE_URL/API_KEY，单独指定模型。
+    默认 ``ecnu-max``（华东师大文档中的主推理模型）；可用环境变量 ``QA_MODEL`` / ``LLM_QA_MODEL`` 覆盖。
+    若网关非 ECNU，请把 QA_MODEL 设为该网关下合法模型名（可与 MODEL 相同）。
+    """
+    base = load_config_from_env()
+    qa_model = (os.getenv("QA_MODEL") or os.getenv("LLM_QA_MODEL") or "ecnu-max").strip()
+    if not qa_model:
+        qa_model = base.model
+    return replace(base, model=qa_model)
+
+
+def load_parallel_llm_config_optional() -> LLMConfig | None:
+    """
+    Optional second OpenAI-compatible endpoint (e.g. DeepSeek) for concurrent calls,
+    so overlap / teen-expand can split traffic off the primary gateway (e.g. ECNU rpm limits).
+
+    Set all three: LLM_PARALLEL_BASE_URL, LLM_PARALLEL_API_KEY, LLM_PARALLEL_MODEL.
+    Optional: LLM_PARALLEL_REQUEST_TIMEOUT_S, LLM_PARALLEL_MAX_RETRIES (fallback to main env values).
+    """
+    base_url = (os.getenv("LLM_PARALLEL_BASE_URL") or "").strip()
+    api_key = (os.getenv("LLM_PARALLEL_API_KEY") or "").strip()
+    model = (os.getenv("LLM_PARALLEL_MODEL") or "").strip()
+    if not base_url or not api_key or not model:
+        return None
+    request_timeout_s = int(os.getenv("LLM_PARALLEL_REQUEST_TIMEOUT_S") or os.getenv("REQUEST_TIMEOUT_S") or "60")
+    max_retries = int(os.getenv("LLM_PARALLEL_MAX_RETRIES") or os.getenv("MAX_RETRIES") or "2")
     return LLMConfig(
         base_url=base_url,
         api_key=api_key,
