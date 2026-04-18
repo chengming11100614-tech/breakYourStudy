@@ -1,3 +1,14 @@
+---
+title: BreakYourStudy
+emoji: 📚
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: "4.44.0"
+app_file: app.py
+pinned: false
+---
+
 # BreakYourStudy（课程作品 / Gradio）
 
 ## 本地运行
