@@ -859,7 +859,7 @@ def main() -> None:
     # Make missing env obvious in UI
     missing_env_hint = ""
     if not (os.getenv("BASE_URL") and os.getenv("API_KEY") and os.getenv("MODEL")):
-        missing_env_hint = "⚠️ 未检测到 BASE_URL API_KEY MODEL 请先创建 .env 然后重启"
+        missing_env_hint = "⚠️ 当前未配置模型服务，生成相关功能暂不可用（仍可浏览与管理本地项目）。"
 
     # Soft 默认 panel 1px + primary 色、块标签 primary_100 底，易被看成「整页绿框」；压成中性描边/标签
     theme = gr.themes.Soft(primary_hue="green", radius_size="lg").set(
@@ -876,7 +876,6 @@ def main() -> None:
         block_title_text_color="*neutral_700",
         block_label_border_width="0px",
     )
-    build_tag = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
     iframe_safe = _iframe_safe_layout()
     if iframe_safe:
         print("* GRADIO_IFRAME_SAFE layout: on (iframe / 创空间)", flush=True)
@@ -1023,7 +1022,7 @@ def main() -> None:
     </g>
     <g class="landing-node landing-node-float" style="animation-delay:2.28s">
       <circle cx="860" cy="350" r="18" fill="#C4E2C6"/>
-      <text x="860" y="355" text-anchor="middle" fill="white" font-size="11" font-weight="600" class="landing-label" style="animation-delay:2.68s">测试</text>
+      <text x="860" y="355" text-anchor="middle" fill="white" font-size="11" font-weight="600" class="landing-label" style="animation-delay:2.68s">复盘</text>
     </g>
     </svg></div>""")
                 btn_go_project = gr.Button("🌱 开始学习", variant="primary", elem_id="landing-start-btn")
@@ -1032,11 +1031,7 @@ def main() -> None:
             gr.HTML("<div class='landing-tagline'>每一个知识点都不是孤岛 —— 让它们生长、连接、成为你的森林</div>")
 
             # ── Footer ──
-            gr.HTML(
-                f"<div class='landing-footer'>"
-                f"build {build_tag} &nbsp;·&nbsp; 种一棵知识树，等一片森林"
-                f"</div>"
-            )
+            gr.HTML("<div class='landing-footer'>种一棵知识树，等一片森林</div>")
 
         with gr.Column(visible=False) as project_p:
             # 顶栏：两按钮收紧在左上，标题占剩余宽（避免 Row 三等分把按钮拉成整行半宽）
@@ -1103,7 +1098,7 @@ def main() -> None:
                             )
                             _md("##### 开始", elem_classes=["section-title"])
                             _md(
-                                "_**提示**：首次点击「开始生成」时，整体加载约 **5～10 分钟**，请耐心等待，勿重复提交。可在 `.env` 设置 `FIRST_SUBMIT_PASSES=1` 或开启 `FIRST_SUBMIT_OVERLAP=1`（见 README）以缩短等待。_"
+                                "_**提示**：首次点击「开始生成」可能需要 **5～10 分钟**（取决于网络与模型服务负载）。请耐心等待，避免重复提交。_"
                             )
                             btn_pipe_1 = gr.Button("开始生成", elem_classes=["btn-primary"])
 
@@ -1115,7 +1110,7 @@ def main() -> None:
                             btn_sidebar_open = gr.Button("切换到该项目", elem_classes=["btn-primary"])
                             sidebar_hint = _md("_选择后点「切换」即可_")
                             sidebar_project_delete_cg = gr.CheckboxGroup(
-                                label="勾选要从本机清除的项目（删除 data/projects 下对应文件）",
+                                label="勾选要从本机清除的项目（仅删除本机保存的数据）",
                                 choices=[],
                                 value=[],
                             )
@@ -1462,7 +1457,7 @@ def main() -> None:
                     if cfg_parallel is not None:
                         progress(0.2, desc="并行：书单走第二通道 + 大纲走主通道…")
                     else:
-                        progress(0.2, desc="书单润色与大纲生成并行中（可设 FIRST_SUBMIT_OVERLAP=0 关闭）…")
+                        progress(0.2, desc="正在生成书单与大纲（并行处理）…")
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         fut_b = pool.submit(_books_refine)
                         fut_f = pool.submit(_framework_from_b1)
@@ -3300,10 +3295,6 @@ def main() -> None:
     server_port = _first_free_port(preferred, server_name)
     if server_port != preferred:
         print(f"* Port {preferred} busy, using {server_port} instead.", flush=True)
-    print(
-        "若页面白屏：先试无痕/禁用扩展，或 F12 → Console 看红色报错。",
-        flush=True,
-    )
     maybe_warmup_llm()
     demo.queue()
     _css = CUSTOM_CSS + (CUSTOM_CSS_IFRAME if iframe_safe else "")
