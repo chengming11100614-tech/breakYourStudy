@@ -1,0 +1,17 @@
+[Unit]
+Description=BreakYourStudy Gradio app
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/breakYourStudy
+# app.py uses load_dotenv(); .env must live in WorkingDirectory
+ExecStart=/root/breakYourStudy/.venv/bin/python /root/breakYourStudy/app.py
+Restart=on-failure
+RestartSec=5
+# Gradio can be slow to stop on SIGTERM during active sessions
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
