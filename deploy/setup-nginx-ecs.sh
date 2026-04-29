@@ -57,9 +57,9 @@ systemctl reload nginx
 install -m 0644 "${SCRIPT_DIR}/breakyourstudy.service" /etc/systemd/system/breakyourstudy.service
 systemctl daemon-reload
 
-# Free 7860 if you still have a manual `python app.py` from SSH (otherwise bind fails)
+# Free 17860 if an old process still holds the fixed app port
 if command -v fuser >/dev/null 2>&1; then
-  fuser -k 7860/tcp 2>/dev/null || true
+  fuser -k 17860/tcp 2>/dev/null || true
   sleep 1
 fi
 

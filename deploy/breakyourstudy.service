@@ -6,6 +6,9 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/breakYourStudy
+# 固定本机监听端口（与 deploy/breakyourstudy.conf 中 upstream 一致）。load_dotenv(override=False) 时不会被子级 .env 覆盖。
+Environment=PORT=17860
+Environment=GRADIO_SERVER_NAME=127.0.0.1
 # app.py uses load_dotenv(); .env must live in WorkingDirectory
 ExecStart=/root/breakYourStudy/.venv/bin/python /root/breakYourStudy/app.py
 Restart=on-failure
